@@ -8,6 +8,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from rich.tree import Tree
 
 from stock_compass.factors.base import FactorScore
 from stock_compass.scoring.engine import DISCLAIMER, CompositeScore, Verdict
@@ -183,3 +184,36 @@ def _short(score: float | None) -> Text:
     if score is None:
         return Text("—", style="dim")
     return _color_score(score)
+
+
+def render_factor_breakdown(score: CompositeScore, console: Console | None = None) -> None:
+    """단일 종목 — 종합 점수 + 5팩터 계층 트리 (raw_values 핵심 지표 포함)."""
+    console = console or Console()
+    header = Text.assemble(
+        (score.ticker, "bold cyan"),
+        (f" [{score.market}]", "dim"),
+        (f"  종합 {score.total_score:.1f}  ", "white"),
+        (score.verdict, _VERDICT_STYLE[score.verdict]),
+    )
+    tree = Tree(header)
+    for f in score.factors:
+        node = tree.add(
+            Text.assemble(
+                (f"{f.name:<12}", "cyan"),
+                (f"  {f.weight:>4.0%}  ", "dim"),
+                _color_score(f.score),
+                (f"  {f.note}", "dim"),
+            )
+        )
+        for k, v in f.raw_values.items():
+            if k == "component_scores" or v is None:
+                continue
+            node.add(Text(f"{k} = {_fmt_raw(v)}", style="dim"))
+    console.print(tree)
+    console.print(Panel(DISCLAIMER, title="면책", border_style="dim", padding=(0, 1)))
+
+
+def _fmt_raw(v: object) -> str:
+    if isinstance(v, float):
+        return f"{v:.4f}" if abs(v) < 1 else f"{v:,.2f}"
+    return str(v)

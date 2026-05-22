@@ -163,15 +163,57 @@ def alert(
 @app.command()
 def report(
     date: Annotated[
-        str | None, typer.Option("--date", help="YYYY-MM-DD (기본: 오늘)")
+        str | None, typer.Option("--date", help="YYYY-MM-DD (기본: 오늘 KST)")
     ] = None,
     open_file: Annotated[
-        bool, typer.Option("--open", help="생성 후 Finder에서 열기")
+        bool, typer.Option("--open", help="생성 후 Finder에서 reveal")
     ] = False,
+    market: Annotated[
+        str | None, typer.Option("--market", "-m", help="kr / us — 미지정 시 전체")
+    ] = None,
 ) -> None:
-    """Craft 일일 노트 Markdown 생성 (Phase 3)."""
-    _ = (date, open_file)
-    raise NotImplementedError("report 명령은 Phase 3에서 구현됩니다.")
+    """Craft 일일 노트 Markdown 생성 (`data/craft_export/YYYY-MM-DD.md`)."""
+    import subprocess
+    from datetime import date as date_cls
+
+    from stock_compass.config import settings
+    from stock_compass.db import get_db_connection, get_scores_on_date
+    from stock_compass.output.craft import CraftExporter
+    from stock_compass.utils.dates import today_kst
+    from stock_compass.utils.logging import setup_logging
+
+    setup_logging(settings.log_dir)
+
+    market_norm = _parse_market(market)
+    if date is None:
+        on_date = today_kst()
+    else:
+        try:
+            on_date = date_cls.fromisoformat(date)
+        except ValueError as e:
+            console.print(f"[red]잘못된 날짜 형식: {date!r} (YYYY-MM-DD 필요)[/red]")
+            raise typer.Exit(code=2) from e
+
+    with get_db_connection() as conn:
+        scores = get_scores_on_date(conn, on_date, market=market_norm)
+
+    if not scores:
+        console.print(
+            f"[yellow]{on_date} 점수 없음 — 먼저 `stock-compass batch` 실행하세요.[/yellow]"
+        )
+        raise typer.Exit(code=1)
+
+    exporter = CraftExporter()
+    path = exporter.export(scores, on_date)
+    console.print(
+        f"[green]✓[/green] 노트 생성: [cyan]{path}[/cyan]  ({len(scores)}종목)"
+    )
+
+    if open_file:
+        try:
+            subprocess.run(["open", "-R", str(path)], check=False)
+        except FileNotFoundError:
+            console.print("[yellow]`open` 명령 미지원 (macOS 외부 환경).[/yellow]")
 
 
 def _parse_market(raw: str | None) -> Market | None:

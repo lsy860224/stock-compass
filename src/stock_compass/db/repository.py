@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -269,6 +270,52 @@ def get_latest_scores(
         params,
     ).fetchall()
     return [_row_to_composite(r, factors=[]) for r in rows]
+
+
+def get_scores_on_date(
+    conn: sqlite3.Connection,
+    on_date: date_cls,
+    *,
+    market: Market | None = None,
+) -> list[CompositeScore]:
+    """특정 일자의 모든 종목 composite + 5팩터. 점수 내림차순. (report 명령용)
+
+    2쿼리(composite + factor)로 N+1 회피.
+    """
+    date_str = on_date.isoformat()
+    where_market = "AND t.market = ?" if market else ""
+    composite_params: tuple[Any, ...] = (date_str, market) if market else (date_str,)
+    composites = conn.execute(
+        f"""
+        SELECT cs.ticker_id, cs.date, cs.total_score, cs.verdict, cs.price_at_score,
+               cs.computed_at,
+               t.code, t.market, t.name, t.sector, t.currency, t.yfinance_symbol
+        FROM composite_scores cs
+        JOIN tickers t ON cs.ticker_id = t.id
+        WHERE cs.date = ? {where_market}
+        ORDER BY cs.total_score DESC
+        """,
+        composite_params,
+    ).fetchall()
+    if not composites:
+        return []
+
+    factor_rows = conn.execute(
+        """
+        SELECT ticker_id, factor_name, score, weight, raw_values, note
+        FROM factor_scores
+        WHERE date = ?
+        """,
+        (date_str,),
+    ).fetchall()
+    factors_by_ticker: dict[int, list[FactorScore]] = defaultdict(list)
+    for fr in factor_rows:
+        factors_by_ticker[int(fr["ticker_id"])].append(_row_to_factor(fr))
+
+    return [
+        _row_to_composite(c, factors_by_ticker.get(int(c["ticker_id"]), []))
+        for c in composites
+    ]
 
 
 # ──────────────────────── helpers ────────────────────────
