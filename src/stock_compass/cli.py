@@ -39,6 +39,8 @@ app = typer.Typer(
 )
 sentiment_app = typer.Typer(help="하이브리드 sentiment — API/Prompt/Import/Status.")
 app.add_typer(sentiment_app, name="sentiment")
+trade_app = typer.Typer(help="매매 일지 — 입력·조회·편향 분석.")
+app.add_typer(trade_app, name="trade")
 console = Console()
 
 
@@ -154,6 +156,49 @@ def history(
     with get_db_connection() as conn:
         rows = get_score_history(conn, ticker, market_norm, days=days)
     render_history(ticker, market_norm, rows, console=console)
+
+
+@app.command("batch-and-alert")
+def batch_and_alert(
+    task: Annotated[
+        str,
+        typer.Option(
+            "--task",
+            help="auto/us/kr/daily/all — auto면 KST 시각 기반 자동 선택",
+        ),
+    ] = "auto",
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="DB·발화 없이 계획만 표시")
+    ] = False,
+) -> None:
+    """launchd가 호출하는 통합 명령 — KST 시각 기반 batch + alert 자동 분기.
+
+    종료 코드: 0=성공, 1=일부 종목 실패, 2=치명적 오류.
+    """
+    import sys
+
+    from stock_compass.config import settings
+    from stock_compass.utils.dates import now_kst
+    from stock_compass.utils.logging import setup_logging
+
+    setup_logging(settings.log_dir)
+
+    resolved = _resolve_task(task, now_kst().hour)
+    console.print(
+        f"[cyan]batch-and-alert[/cyan] task=[yellow]{resolved}[/yellow]"
+        f" (요청={task}, KST={now_kst().strftime('%Y-%m-%d %H:%M')})"
+    )
+
+    try:
+        exit_code = _run_scheduled_task(resolved, dry_run=dry_run)
+    except KeyboardInterrupt:
+        console.print("[red]사용자 중단[/red]")
+        raise typer.Exit(code=130) from None
+    except Exception as e:
+        console.print(f"[red]치명적 오류: {type(e).__name__}: {e}[/red]")
+        sys.exit(2)
+
+    sys.exit(exit_code)
 
 
 @app.command()
@@ -466,6 +511,184 @@ def news(
     )
 
 
+@trade_app.command("add")
+def trade_add(
+    ticker: Annotated[str, typer.Argument(help="종목 코드")],
+    side: Annotated[str, typer.Argument(help="buy / sell")],
+    price: Annotated[float, typer.Option("--price", "-p", help="체결가 (현지 통화)")],
+    qty: Annotated[float, typer.Option("--qty", "-q", help="수량 (분할 매매 OK)")],
+    reason: Annotated[
+        str | None, typer.Option("--reason", "-r", help="매매 사유 (편향 분석용)")
+    ] = None,
+    tag: Annotated[
+        str | None,
+        typer.Option(
+            "--tag", help="planned / impulse / rebalance / 본인 정의 (분석용)"
+        ),
+    ] = None,
+    market: Annotated[
+        str | None, typer.Option("--market", "-m", help="kr / us")
+    ] = None,
+    score: Annotated[
+        float | None,
+        typer.Option("--score", help="진입 시점 점수 명시 (미지정 시 자동 최신)"),
+    ] = None,
+) -> None:
+    """매매 한 건 기록 (점수 자동 lookup 또는 수동 지정)."""
+    from stock_compass.config import settings
+    from stock_compass.db import get_db_connection, insert_trade
+    from stock_compass.markets import detect_market
+    from stock_compass.utils.logging import setup_logging
+
+    setup_logging(settings.log_dir)
+
+    side_norm = side.lower()
+    if side_norm not in ("buy", "sell"):
+        console.print(f"[red]side는 buy/sell: {side!r}[/red]")
+        raise typer.Exit(code=2)
+    market_norm = _parse_market(market) or detect_market(ticker)
+
+    try:
+        with get_db_connection() as conn:
+            trade = insert_trade(
+                conn,
+                ticker=ticker,
+                market=market_norm,
+                side=side_norm,  # type: ignore[arg-type]
+                price=price,
+                qty=qty,
+                reason=reason,
+                tag=tag,
+                score_at_trade=score,
+            )
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=2) from e
+
+    score_str = (
+        f"{trade.score_at_trade:.1f}" if trade.score_at_trade is not None else "—"
+    )
+    console.print(
+        f"[green]✓[/green] {trade.side.upper()} {trade.ticker} "
+        f"{trade.qty:g} @ {trade.price:,.2f} (점수 {score_str})"
+        + (f"\n  사유: {trade.reason}" if trade.reason else "")
+        + (f"\n  태그: {trade.tag}" if trade.tag else "")
+    )
+
+
+@trade_app.command("list")
+def trade_list(
+    days: Annotated[int, typer.Option("--days", "-d", help="최근 N일")] = 30,
+    ticker: Annotated[
+        str | None, typer.Option("--ticker", "-t", help="특정 종목만")
+    ] = None,
+    market: Annotated[
+        str | None, typer.Option("--market", "-m", help="kr / us")
+    ] = None,
+) -> None:
+    """매매 일지 조회 (최신순)."""
+    from rich.table import Table
+
+    from stock_compass.config import settings
+    from stock_compass.db import get_db_connection, get_trades
+    from stock_compass.utils.logging import setup_logging
+
+    setup_logging(settings.log_dir)
+    market_norm = _parse_market(market)
+
+    with get_db_connection() as conn:
+        trades = get_trades(conn, days=days, ticker=ticker, market=market_norm)
+
+    if not trades:
+        console.print(f"[yellow]최근 {days}일 매매 없음.[/yellow]")
+        return
+
+    table = Table(title=f"매매 일지 (최근 {days}일, {len(trades)}건)")
+    table.add_column("일시", style="cyan", no_wrap=True)
+    table.add_column("종목", style="cyan")
+    table.add_column("매매", justify="center")
+    table.add_column("가격", justify="right")
+    table.add_column("수량", justify="right")
+    table.add_column("점수", justify="right")
+    table.add_column("태그", style="magenta")
+    table.add_column("사유", overflow="fold")
+
+    for t in trades:
+        side_color = "green" if t.side == "buy" else "red"
+        table.add_row(
+            t.executed_at.split("T")[0],
+            f"{t.ticker} [{t.market}]",
+            f"[{side_color}]{t.side.upper()}[/{side_color}]",
+            f"{t.price:,.2f}",
+            f"{t.qty:g}",
+            f"{t.score_at_trade:.1f}" if t.score_at_trade is not None else "—",
+            t.tag or "—",
+            t.reason or "—",
+        )
+    console.print(table)
+
+
+@trade_app.command("analyze")
+def trade_analyze(
+    days: Annotated[int, typer.Option("--days", "-d", help="분석 기간 N일")] = 90,
+) -> None:
+    """본인 매매 편향 리포트 — 진입 시점 점수 분포 + 태그별 평균."""
+    from rich.table import Table
+
+    from stock_compass.config import settings
+    from stock_compass.db import get_db_connection, get_performance_summary
+    from stock_compass.utils.logging import setup_logging
+
+    setup_logging(settings.log_dir)
+    with get_db_connection() as conn:
+        summary = get_performance_summary(conn, days=days)
+
+    if summary["total"] == 0:
+        console.print(
+            f"[yellow]최근 {days}일 점수 동반 매매 없음 — "
+            "`trade add` + batch 사전 실행 필요.[/yellow]"
+        )
+        return
+
+    console.print(
+        f"[cyan]편향 분석[/cyan] · 최근 {days}일 · 총 {summary['total']}건 "
+        "(점수 동반)\n"
+    )
+
+    side_table = Table(title="매수 vs 매도 (진입 점수)")
+    side_table.add_column("방향", style="cyan")
+    side_table.add_column("건수", justify="right")
+    side_table.add_column("평균 점수", justify="right")
+    side_table.add_column("70+ 비율", justify="right")
+    side_table.add_column("30- 비율", justify="right")
+    for side in ("buy", "sell"):
+        stat = summary["by_side"][side]
+        avg = stat["avg_score"]
+        avg_str = f"{avg:.1f}" if avg is not None else "—"
+        side_table.add_row(
+            side.upper(),
+            str(stat["count"]),
+            avg_str,
+            f"{stat['high_zone_pct']:.1f}%",
+            f"{stat['low_zone_pct']:.1f}%",
+        )
+    console.print(side_table)
+
+    if summary["by_tag"]:
+        tag_table = Table(title="태그별 평균 진입 점수")
+        tag_table.add_column("태그", style="magenta")
+        tag_table.add_column("건수", justify="right")
+        tag_table.add_column("평균 점수", justify="right")
+        for tag, stat in sorted(summary["by_tag"].items()):
+            tag_table.add_row(tag, str(stat["count"]), f"{stat['avg_score']:.1f}")
+        console.print(tag_table)
+
+    console.print(
+        "[dim]힌트: 매수 평균 점수 > 70 → FOMO 추격 경향, "
+        "< 50 → 역추세 저점 매수 경향. 본인 전략과 의도된 방향인지 검토.[/dim]"
+    )
+
+
 def _parse_market(raw: str | None) -> Market | None:
     """--market 옵션 → 'KR'/'US' 또는 None. 잘못된 값은 즉시 종료."""
     if raw is None:
@@ -496,6 +719,105 @@ def _resolve_targets(
     if forced_market in (None, "US"):
         out.extend((t, "US") for t in wl_us)
     return out
+
+
+def _resolve_task(task: str, hour: int) -> str:
+    """`auto` 입력을 KST 시각 기반 us/kr/daily/all로 변환."""
+    t = task.lower()
+    if t in ("us", "kr", "daily", "all"):
+        return t
+    if t != "auto":
+        raise typer.BadParameter(f"--task는 auto/us/kr/daily/all 중 하나: {task!r}")
+    # 시각 분기 — plist (06:30 / 07:00 / 16:30) 매칭, ±1h 관용
+    if hour == 7:
+        return "daily"
+    if 5 <= hour < 7 or hour == 8:
+        return "us"
+    if 15 <= hour <= 17:
+        return "kr"
+    return "all"
+
+
+def _run_scheduled_task(task: str, *, dry_run: bool) -> int:
+    """단일 task 실행. 0=성공, 1=일부 실패."""
+
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        TaskProgressColumn,
+        TextColumn,
+        TimeElapsedColumn,
+    )
+
+    from stock_compass.alerts import default_manager
+    from stock_compass.config import settings
+    from stock_compass.db import get_db_connection
+    from stock_compass.output.craft import CraftExporter
+    from stock_compass.output.terminal import render_score_ranking
+    from stock_compass.scoring import ScoringEngine
+    from stock_compass.utils.dates import today_kst
+
+    exit_code = 0
+
+    if task in ("us", "kr", "all"):
+        forced: Market | None = (
+            "US" if task == "us" else "KR" if task == "kr" else None
+        )
+        targets = _resolve_targets(
+            None, forced, settings.watchlist_kr, settings.watchlist_us
+        )
+        if not targets:
+            console.print(
+                f"[yellow]task={task} — 대상 종목 없음 (워치리스트 확인)[/yellow]"
+            )
+            return 1
+
+        engine = ScoringEngine()
+        market_for: dict[str, Market] = dict(targets)
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("•"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            results = _run_mixed(
+                engine,
+                [t for t, _ in targets],
+                market_for,
+                progress,
+                persist=not dry_run,
+            )
+        if len(results) < len(targets):
+            exit_code = 1  # 일부 실패
+        if results:
+            render_score_ranking(results, console=console)
+
+    # alert는 모든 task에서 실행 (daily 트리거가 자체 dedup)
+    manager = default_manager()
+    with get_db_connection() as conn:
+        fired = manager.run(conn, on_date=today_kst(), dry_run=dry_run)
+    delivered = sum(1 for f in fired if f.delivered)
+    deduped = sum(1 for f in fired if f.deduplicated)
+    console.print(
+        f"[cyan]alert[/cyan] fired={delivered} deduped={deduped}"
+        + (" [dim](dry-run)[/dim]" if dry_run else "")
+    )
+
+    if task in ("daily", "all"):
+        # 07:00 KST 또는 manual — 오늘자 Craft 노트 생성
+        with get_db_connection() as conn:
+            from stock_compass.db import get_scores_on_date
+
+            scores = get_scores_on_date(conn, today_kst())
+        if scores and not dry_run:
+            path = CraftExporter().export(scores, today_kst())
+            console.print(f"[green]✓[/green] Craft 노트: [cyan]{path}[/cyan]")
+        elif not scores:
+            console.print("[yellow]오늘 스냅샷 없음 — Craft 노트 생략[/yellow]")
+
+    return exit_code
 
 
 def _run_mixed(
