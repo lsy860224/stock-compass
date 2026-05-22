@@ -95,14 +95,18 @@ class TestMigrate:
             assert required in names, f"테이블 누락: {required}"
 
     def test_idempotent(self, db_path: Path) -> None:
-        # 두 번째 migrate 호출은 no-op이어야 함
-        v = migrate(db_path)
-        assert v == 1
+        # 두 번째 migrate 호출은 no-op이어야 함 — 최신 버전 그대로 반환
+        from stock_compass.db.migrations import MIGRATIONS
 
-    def test_records_version(self, db_path: Path) -> None:
+        latest = MIGRATIONS[-1].version
+        assert migrate(db_path) == latest
+
+    def test_records_latest_version(self, db_path: Path) -> None:
+        from stock_compass.db.migrations import MIGRATIONS
+
         c = sqlite3.connect(db_path)
         row = c.execute("SELECT MAX(version) FROM schema_version").fetchone()
-        assert row[0] == 1
+        assert row[0] == MIGRATIONS[-1].version
 
 
 class TestTickerUpsert:

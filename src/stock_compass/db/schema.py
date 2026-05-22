@@ -1,7 +1,7 @@
 """SQLite 마이그레이션 SQL 상수.
 
-docs/DB_SCHEMA.md의 정의를 그대로 옮겨옴. Phase 4 (news.source/batch_id) 와 Phase 7
-(universe_members, watchlists, screener_runs, views)는 향후 마이그레이션으로 추가.
+docs/DB_SCHEMA.md의 정의를 그대로 옮겨옴. Phase 7 (universe_members, watchlists,
+screener_runs, views)는 향후 마이그레이션으로 추가.
 """
 
 from __future__ import annotations
@@ -123,3 +123,32 @@ BEGIN
   UPDATE tickers SET updated_at = datetime('now') WHERE id = NEW.id;
 END;
 """
+
+
+MIGRATION_002_HYBRID_SENTIMENT = """
+ALTER TABLE news_summaries ADD COLUMN source TEXT
+  NOT NULL DEFAULT 'api'
+  CHECK(source IN ('api','manual_prompt','fallback'));
+ALTER TABLE news_summaries ADD COLUMN batch_id TEXT;
+
+ALTER TABLE composite_scores ADD COLUMN sentiment_source TEXT
+  CHECK(sentiment_source IN ('api','manual_prompt','fallback','cache','placeholder'))
+  DEFAULT 'placeholder';
+
+CREATE TABLE IF NOT EXISTS daily_token_usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  date TEXT NOT NULL,
+  model TEXT NOT NULL,
+  mode TEXT NOT NULL CHECK(mode IN ('api','manual_prompt')),
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  call_count INTEGER NOT NULL DEFAULT 0,
+  estimated_cost_usd REAL NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(date, model, mode)
+);
+CREATE INDEX IF NOT EXISTS idx_daily_token_usage_date ON daily_token_usage(date DESC);
+CREATE INDEX IF NOT EXISTS idx_news_summaries_source ON news_summaries(ticker_id, source);
+CREATE INDEX IF NOT EXISTS idx_news_summaries_batch ON news_summaries(batch_id);
+"""
+

@@ -7,7 +7,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from stock_compass.db.schema import MIGRATION_001_INITIAL
+from stock_compass.db.schema import (
+    MIGRATION_001_INITIAL,
+    MIGRATION_002_HYBRID_SENTIMENT,
+)
 from stock_compass.utils.logging import get_logger
 
 _logger = get_logger(__name__)
@@ -22,6 +25,7 @@ class Migration:
 
 MIGRATIONS: Sequence[Migration] = (
     Migration(version=1, name="initial", sql=MIGRATION_001_INITIAL),
+    Migration(version=2, name="hybrid_sentiment", sql=MIGRATION_002_HYBRID_SENTIMENT),
 )
 
 

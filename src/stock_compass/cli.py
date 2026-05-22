@@ -1,17 +1,22 @@
 """stock-compass CLI — typer 진입점.
 
 명령:
-    score    단일 종목 점수 (Phase 1)
-    batch    워치리스트 일일 배치 (Phase 2)
-    history  종목 점수 추이 (Phase 2)
-    alert    알림 트리거 체크 (Phase 5)
-    report   Craft 일일 노트 생성 (Phase 3)
+    score              단일 종목 점수 (Phase 1)
+    batch              워치리스트 일일 배치 (Phase 2)
+    history            종목 점수 추이 (Phase 2)
+    report             Craft 일일 노트 생성 (Phase 3)
+    sentiment prompt   수동 sentiment용 Markdown 생성 (Phase 4)
+    sentiment import   Claude.ai 응답 파일 → DB (Phase 4)
+    sentiment status   토큰 사용량 + 대기 batch (Phase 4)
+    news               단일 종목 뉴스 목록 (Phase 4)
+    alert              알림 트리거 체크 (Phase 5)
 
 면책: 본 도구의 출력은 투자 자문이 아닙니다. 본인 판단의 보조 자료입니다.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, get_args
 
 import typer
@@ -32,6 +37,8 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+sentiment_app = typer.Typer(help="하이브리드 sentiment — API/Prompt/Import/Status.")
+app.add_typer(sentiment_app, name="sentiment")
 console = Console()
 
 
@@ -214,6 +221,185 @@ def report(
             subprocess.run(["open", "-R", str(path)], check=False)
         except FileNotFoundError:
             console.print("[yellow]`open` 명령 미지원 (macOS 외부 환경).[/yellow]")
+
+
+@sentiment_app.command("prompt")
+def sentiment_prompt(
+    tickers: Annotated[
+        str, typer.Option("--tickers", "-t", help="콤마 구분 종목 코드 (필수)")
+    ],
+    days: Annotated[int, typer.Option("--days", "-d", help="최근 N일 뉴스/공시")] = 7,
+    tag: Annotated[str, typer.Option("--tag", help="batch_id에 포함될 태그")] = "sentiment",
+    market: Annotated[
+        str | None, typer.Option("--market", "-m", help="kr / us — 자동 감지가 기본")
+    ] = None,
+) -> None:
+    """수동 sentiment용 Markdown 파일 생성 — Claude.ai에 복붙."""
+    from stock_compass.config import settings
+    from stock_compass.markets import detect_market
+    from stock_compass.output.prompt_generator import PromptGenerator
+    from stock_compass.utils.logging import setup_logging
+
+    setup_logging(settings.log_dir)
+    forced = _parse_market(market)
+    codes = [t.strip() for t in tickers.split(",") if t.strip()]
+    if not codes:
+        console.print("[red]--tickers 비어 있음[/red]")
+        raise typer.Exit(code=2)
+
+    pairs: list[tuple[str, Market]] = [
+        (c, forced or detect_market(c)) for c in codes
+    ]
+    result = PromptGenerator().generate_sentiment_prompt(pairs, days=days, tag=tag)
+
+    console.print(
+        f"[green]✓[/green] Prompt 생성: [cyan]{result.path}[/cyan]"
+        f"  (batch_id=[yellow]{result.batch_id}[/yellow], "
+        f"{result.ticker_count}종목, 파일 {result.file_count}개)"
+    )
+    console.print(
+        "\n[dim]다음 단계:[/dim]\n"
+        f"  1. 위 파일 전체를 Claude.ai에 복붙\n"
+        f"  2. 응답을 텍스트 파일로 저장\n"
+        f"  3. [cyan]stock-compass sentiment import "
+        f"--file <응답파일> --batch-id {result.batch_id}[/cyan]"
+    )
+
+
+@sentiment_app.command("import")
+def sentiment_import(
+    file: Annotated[Path, typer.Option("--file", "-f", help="Claude.ai 응답 파일 경로")],
+    batch_id: Annotated[
+        str | None,
+        typer.Option(
+            "--batch-id",
+            help="기대 batch_id (지정 시 응답과 일치 검증; 미지정 시 응답 값 사용)",
+        ),
+    ] = None,
+    no_archive: Annotated[
+        bool, typer.Option("--no-archive", help="처리 후 archive/로 사본 복사 생략")
+    ] = False,
+) -> None:
+    """Claude.ai JSON 응답 파일 → news_summaries (source='manual_prompt') 저장."""
+    from stock_compass.config import settings
+    from stock_compass.db import get_db_connection
+    from stock_compass.llm.prompt_importer import (
+        PromptImportError,
+        import_response,
+    )
+    from stock_compass.utils.logging import setup_logging
+
+    setup_logging(settings.log_dir)
+
+    if not file.exists():
+        console.print(f"[red]파일 없음: {file}[/red]")
+        raise typer.Exit(code=2)
+
+    try:
+        with get_db_connection() as conn:
+            result = import_response(
+                conn, file, batch_id=batch_id, archive=not no_archive
+            )
+    except PromptImportError as e:
+        console.print(f"[red]import 실패: {e}[/red]")
+        raise typer.Exit(code=1) from e
+
+    console.print(
+        f"[green]✓[/green] 저장: {result.saved}건  ·  batch_id={result.batch_id}"
+    )
+    for w in result.warnings:
+        console.print(f"  [yellow]⚠ {w}[/yellow]")
+    for b in result.blocked:
+        console.print(f"  [red]✕ {b}[/red]")
+    if result.archived_to:
+        console.print(f"  [dim]archive: {result.archived_to}[/dim]")
+
+
+@sentiment_app.command("status")
+def sentiment_status() -> None:
+    """오늘의 Anthropic 토큰 사용량 + 대기 중 prompt batch 목록."""
+    from rich.table import Table
+
+    from stock_compass.config import settings
+    from stock_compass.db import get_db_connection, get_today_token_usage
+    from stock_compass.utils.logging import setup_logging
+
+    setup_logging(settings.log_dir)
+
+    with get_db_connection() as conn:
+        usage = get_today_token_usage(conn, mode="api")
+
+    in_used = int(usage["input_tokens"])
+    in_limit = settings.anthropic_daily_input_limit
+    pct = (in_used / in_limit * 100) if in_limit > 0 else 0.0
+
+    table = Table(title="오늘 토큰 사용량 (API)", show_lines=False)
+    table.add_column("항목", style="cyan")
+    table.add_column("값", justify="right")
+    table.add_row("Input tokens", f"{in_used:,} / {in_limit:,} ({pct:.1f}%)")
+    table.add_row("Output tokens", f"{int(usage['output_tokens']):,}")
+    table.add_row("호출 수", f"{int(usage['call_count']):,}")
+    table.add_row("누적 비용", f"${float(usage['cost_usd']):.4f}")
+    console.print(table)
+
+    pending = sorted(
+        p for p in settings.prompt_dir.glob("*.md") if p.parent == settings.prompt_dir
+    )
+    if pending:
+        console.print(
+            f"\n[cyan]대기 중 prompt 파일 ({len(pending)}개):[/cyan]"
+        )
+        for p in pending:
+            console.print(f"  - {p.name}")
+        console.print(
+            "\n[dim]응답 받으면 `stock-compass sentiment import --file <응답>` 실행[/dim]"
+        )
+    else:
+        console.print(f"\n[dim]대기 중 prompt 없음 ({settings.prompt_dir})[/dim]")
+
+
+@app.command()
+def news(
+    ticker: Annotated[str, typer.Argument(help="종목 코드")],
+    days: Annotated[int, typer.Option("--days", "-d", help="최근 N일")] = 7,
+    market: Annotated[
+        str | None, typer.Option("--market", "-m", help="kr / us")
+    ] = None,
+) -> None:
+    """단일 종목 최근 뉴스 목록 (sentiment 모드 무관, 어댑터에서 직접)."""
+    from rich.table import Table
+
+    from stock_compass.config import settings
+    from stock_compass.markets import get_adapter
+    from stock_compass.utils.logging import setup_logging
+
+    setup_logging(settings.log_dir)
+    market_norm = _parse_market(market)
+
+    adapter = get_adapter(ticker, market_norm)
+    items = adapter.get_news(ticker, days=days)
+
+    if not items:
+        console.print(
+            f"[yellow]{ticker}: 최근 {days}일 뉴스 없음 (소스: {adapter.market}).[/yellow]"
+        )
+        return
+
+    table = Table(title=f"{ticker} 최근 뉴스 ({len(items)}건)", show_lines=False)
+    table.add_column("일자", style="cyan", no_wrap=True)
+    table.add_column("출처", style="dim")
+    table.add_column("제목", overflow="fold")
+    for n in items:
+        table.add_row(
+            n.published_at.strftime("%Y-%m-%d"),
+            n.source_name or "—",
+            n.title,
+        )
+    console.print(table)
+    console.print(
+        "[dim]면책: AI 생성 요약 아님 — 어댑터(yfinance 등) 원본 메타데이터. "
+        "Claude 요약은 batch 실행 후 sentiment 팩터 결과로 확인.[/dim]"
+    )
 
 
 def _parse_market(raw: str | None) -> Market | None:

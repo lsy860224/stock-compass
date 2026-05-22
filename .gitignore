@@ -27,6 +27,7 @@ data/*.db-shm
 data/cache/
 data/backups/
 data/craft_export/
+data/prompts/
 
 # ─── 로그 ───
 logs/
