@@ -176,6 +176,41 @@ def upsert_composite_score(
     return ticker_id
 
 
+def get_previous_composite_score(
+    conn: sqlite3.Connection,
+    ticker_id: int,
+    *,
+    before_date: date_cls,
+) -> CompositeScore | None:
+    """`before_date` 이전(미포함)에서 가장 최근 composite + 5팩터.
+
+    threshold·delta 트리거가 "직전 점수" 비교용으로 사용.
+    """
+    row = conn.execute(
+        """
+        SELECT cs.date, cs.total_score, cs.verdict, cs.price_at_score, cs.computed_at,
+               t.code, t.market, t.name, t.sector, t.currency, t.yfinance_symbol
+        FROM composite_scores cs
+        JOIN tickers t ON cs.ticker_id = t.id
+        WHERE cs.ticker_id = ? AND cs.date < ?
+        ORDER BY cs.date DESC
+        LIMIT 1
+        """,
+        (ticker_id, before_date.isoformat()),
+    ).fetchone()
+    if row is None:
+        return None
+    factor_rows = conn.execute(
+        """
+        SELECT factor_name, score, weight, raw_values, note
+        FROM factor_scores
+        WHERE ticker_id = ? AND date = ?
+        """,
+        (ticker_id, row["date"]),
+    ).fetchall()
+    return _row_to_composite(row, [_row_to_factor(r) for r in factor_rows])
+
+
 def get_last_score(
     conn: sqlite3.Connection, code: str, market: Market
 ) -> CompositeScore | None:
@@ -491,6 +526,97 @@ def get_today_token_usage(
         "call_count": int(row["call_count"]),
         "cost_usd": float(row["cost_usd"]),
     }
+
+
+# ──────────────────────── alerts (Phase 5) ────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class AlertRow:
+    ticker_id: int
+    trigger_type: str
+    score_before: float | None
+    score_after: float
+    message: str
+    delivered_via: str
+    fired_at: str  # ISO UTC
+
+
+def has_recent_alert(
+    conn: sqlite3.Connection,
+    ticker_id: int,
+    trigger_type: str,
+    *,
+    hours: int = 24,
+) -> bool:
+    """동일 종목·동일 trigger가 N시간 내 발화된 적 있는지."""
+    row = conn.execute(
+        """
+        SELECT 1 FROM alerts
+        WHERE ticker_id = ? AND trigger_type = ?
+          AND fired_at > datetime('now', ?)
+        LIMIT 1
+        """,
+        (ticker_id, trigger_type, f"-{hours} hours"),
+    ).fetchone()
+    return row is not None
+
+
+def has_daily_alert_today(
+    conn: sqlite3.Connection, *, on_date: date_cls | None = None
+) -> bool:
+    """일일 리포트 알림이 오늘(KST 기준) 이미 발화됐는지."""
+    d = (on_date or today_kst()).isoformat()
+    row = conn.execute(
+        """
+        SELECT 1 FROM alerts
+        WHERE trigger_type = 'daily' AND DATE(fired_at, 'localtime') = ?
+        LIMIT 1
+        """,
+        (d,),
+    ).fetchone()
+    return row is not None
+
+
+def record_alert(conn: sqlite3.Connection, alert: AlertRow) -> int:
+    """alerts 테이블에 한 행 추가. 발화 이력 영구 보존."""
+    cur = conn.execute(
+        """
+        INSERT INTO alerts
+          (ticker_id, trigger_type, score_before, score_after,
+           message, delivered_via, fired_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            alert.ticker_id,
+            alert.trigger_type,
+            alert.score_before,
+            alert.score_after,
+            alert.message,
+            alert.delivered_via,
+            alert.fired_at,
+        ),
+    )
+    return int(cur.lastrowid or 0)
+
+
+def get_recent_alerts(
+    conn: sqlite3.Connection, *, hours: int = 24
+) -> list[dict[str, Any]]:
+    """최근 N시간 발화된 알림 (목록·디버그용)."""
+    rows = conn.execute(
+        """
+        SELECT a.id, a.trigger_type, a.score_before, a.score_after, a.message,
+               a.delivered_via, a.fired_at,
+               t.code, t.market, t.name
+        FROM alerts a
+        JOIN tickers t ON a.ticker_id = t.id
+        WHERE a.fired_at > datetime('now', ?)
+        ORDER BY a.fired_at DESC
+        """,
+        (f"-{hours} hours",),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ──────────────────────── helpers ────────────────────────
