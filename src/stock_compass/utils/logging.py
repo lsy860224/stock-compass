@@ -14,6 +14,20 @@ _BACKUP_COUNT = 5
 _SENTINEL_ATTR = "_stock_compass_configured"
 
 
+class _ValidMessageFilter(logging.Filter):
+    """비정상 형식의 LogRecord(예: pykrx의 `logging.info(tuple, dict)`)를 차단.
+
+    RichHandler.emit은 format 예외를 catch하지 않아서 호출자까지 전파됨 — 사전 차단.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            record.getMessage()
+        except (TypeError, ValueError):
+            return False
+        return True
+
+
 def setup_logging(
     log_dir: Path,
     *,
@@ -27,6 +41,8 @@ def setup_logging(
 
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    valid_filter = _ValidMessageFilter()
+
     rich_handler = RichHandler(
         rich_tracebacks=True,
         show_time=True,
@@ -34,6 +50,7 @@ def setup_logging(
         markup=True,
     )
     rich_handler.setLevel(level)
+    rich_handler.addFilter(valid_filter)
 
     file_handler = RotatingFileHandler(
         log_dir / filename,
@@ -45,6 +62,7 @@ def setup_logging(
     file_handler.setFormatter(
         logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     )
+    file_handler.addFilter(valid_filter)
 
     root.handlers.clear()
     root.addHandler(rich_handler)
@@ -52,7 +70,7 @@ def setup_logging(
     root.setLevel(level)
 
     # 외부 라이브러리 노이즈 억제
-    for noisy in ("urllib3", "yfinance", "peewee"):
+    for noisy in ("urllib3", "yfinance", "peewee", "pykrx"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     setattr(root, _SENTINEL_ATTR, True)

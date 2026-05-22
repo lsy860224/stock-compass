@@ -1,0 +1,304 @@
+"""한국 시장 어댑터 (yfinance + pykrx + DART)."""
+
+from __future__ import annotations
+
+import re
+from datetime import UTC, datetime, time, timedelta
+from functools import lru_cache
+from typing import TYPE_CHECKING, Any
+
+from stock_compass.config import settings
+from stock_compass.markets.base import (
+    Currency,
+    Disclosure,
+    Fundamentals,
+    MarketAdapter,
+    News,
+    PriceHistory,
+)
+from stock_compass.markets.us import UsAdapter, _get, _parse_news_time
+from stock_compass.utils.cache import (
+    cache_key_for_today,
+    load_dataframe,
+    load_json,
+    save_dataframe,
+    save_json,
+)
+from stock_compass.utils.logging import get_logger
+from stock_compass.utils.retry import external_call_retry
+
+if TYPE_CHECKING:
+    import pandas as pd
+
+_logger = get_logger(__name__)
+_HISTORY_TTL = timedelta(hours=24)
+_INFO_TTL = timedelta(hours=6)
+_DISCLOSURE_TTL = timedelta(hours=6)
+_KR_CODE_RE = re.compile(r"^\d{6}$")
+
+
+@lru_cache(maxsize=1)
+def _kospi_codes() -> frozenset[str]:
+    try:
+        from pykrx.stock import get_market_ticker_list
+
+        return frozenset(get_market_ticker_list(market="KOSPI"))
+    except (ConnectionError, TimeoutError, ValueError, IndexError, KeyError, OSError) as e:
+        _logger.warning("KOSPI 종목 목록 조회 실패 (pykrx/KRX): %s — .KS 추정 사용", e)
+        return frozenset()
+
+
+@lru_cache(maxsize=1)
+def _kosdaq_codes() -> frozenset[str]:
+    try:
+        from pykrx.stock import get_market_ticker_list
+
+        return frozenset(get_market_ticker_list(market="KOSDAQ"))
+    except (ConnectionError, TimeoutError, ValueError, IndexError, KeyError, OSError) as e:
+        _logger.warning("KOSDAQ 종목 목록 조회 실패 (pykrx/KRX): %s — .KQ 미사용", e)
+        return frozenset()
+
+
+def is_kospi(code: str) -> bool:
+    return code in _kospi_codes()
+
+
+def is_kosdaq(code: str) -> bool:
+    return code in _kosdaq_codes()
+
+
+class KrAdapter(MarketAdapter):
+    """KR. yfinance 1차 + pykrx 보조 + DART 공시."""
+
+    market = "KR"
+
+    # ─── 심볼 변환 ───
+
+    def to_yfinance_symbol(self, ticker: str) -> str:
+        code = self._normalize_code(ticker)
+        if is_kospi(code):
+            return f"{code}.KS"
+        if is_kosdaq(code):
+            return f"{code}.KQ"
+        # 미상 — 일단 KOSPI 추정 (대부분 시총 상위 KOSPI), 호출자가 로그로 확인
+        _logger.warning("KR 시장 미상 종목, KOSPI(.KS)로 추정: %s", code)
+        return f"{code}.KS"
+
+    @staticmethod
+    def _normalize_code(ticker: str) -> str:
+        """`005930.KS` / `005930` / `5930` → `005930`."""
+        t = ticker.split(".", maxsplit=1)[0]
+        if not t.isdigit():
+            raise ValueError(f"KR 종목 코드는 6자리 숫자여야 합니다: {ticker!r}")
+        code = t.zfill(6)
+        if not _KR_CODE_RE.match(code):
+            raise ValueError(f"KR 종목 코드 형식 오류: {ticker!r}")
+        return code
+
+    def get_currency(self) -> Currency:
+        return "KRW"
+
+    def get_trading_hours(self) -> tuple[time, time]:
+        return (time(9, 0), time(15, 30))
+
+    # ─── price history ───
+
+    def get_price_history(self, ticker: str, *, period: str = "1y") -> PriceHistory:
+        code = self._normalize_code(ticker)
+        symbol = self.to_yfinance_symbol(code)
+        cache_name = f"{cache_key_for_today(symbol)}-{period}"
+        df = load_dataframe(cache_name, _HISTORY_TTL)
+        source = "cache"
+        if df is None:
+            df = self._fetch_history_yf(symbol, period)
+            source = "yfinance"
+            if df.empty:
+                _logger.info("yfinance KR 빈 결과 → pykrx fallback: %s", code)
+                df = self._fetch_history_pykrx(code, period)
+                source = "pykrx"
+            if not df.empty:
+                save_dataframe(cache_name, df)
+        if df.empty:
+            _logger.warning("KR OHLCV 비어 있음: %s (period=%s)", code, period)
+        return PriceHistory(
+            ticker=code, market="KR", currency="KRW", source=source, df=df
+        )
+
+    @external_call_retry
+    def _fetch_history_yf(self, symbol: str, period: str) -> pd.DataFrame:
+        # UsAdapter의 _fetch_history와 동일 로직 — 위임
+        return UsAdapter()._fetch_history(symbol, period)
+
+    def _fetch_history_pykrx(self, code: str, period: str) -> pd.DataFrame:
+        import pandas as pd
+        from pykrx.stock import get_market_ohlcv_by_date
+
+        end = datetime.now(UTC).date()
+        days_map = {"1mo": 31, "3mo": 95, "6mo": 190, "1y": 380, "2y": 760, "5y": 1900}
+        days = days_map.get(period, 380)
+        start = end - timedelta(days=days)
+        try:
+            df = get_market_ohlcv_by_date(
+                start.strftime("%Y%m%d"), end.strftime("%Y%m%d"), code
+            )
+        except (ConnectionError, TimeoutError, ValueError, IndexError, OSError) as e:
+            _logger.warning("pykrx OHLCV 실패: %s (%s)", code, e)
+            return pd.DataFrame()
+        if df.empty:
+            return df
+        df = df.rename(
+            columns={
+                "시가": "open",
+                "고가": "high",
+                "저가": "low",
+                "종가": "close",
+                "거래량": "volume",
+            }
+        )
+        df["adj_close"] = df["close"]
+        return df[["open", "high", "low", "close", "volume", "adj_close"]]
+
+    # ─── fundamentals ───
+
+    def get_fundamentals(self, ticker: str) -> Fundamentals:
+        code = self._normalize_code(ticker)
+        symbol = self.to_yfinance_symbol(code)
+        cache_name = f"info-{cache_key_for_today(symbol)}"
+        info: dict[str, Any] | None = load_json(cache_name, _INFO_TTL)
+        if info is None:
+            info = UsAdapter()._fetch_info(symbol)
+            if info:
+                save_json(cache_name, info)
+        info = info or {}
+
+        # pykrx로 PER/PBR 보강 (yfinance KR 누락 빈번)
+        per = _get(info, "trailingPE", as_=float)
+        pbr = _get(info, "priceToBook", as_=float)
+        if per is None or pbr is None:
+            pykrx_fund = self._fetch_fundamentals_pykrx(code)
+            per = per or pykrx_fund.get("per")
+            pbr = pbr or pykrx_fund.get("pbr")
+
+        return Fundamentals(
+            ticker=code,
+            market="KR",
+            currency="KRW",
+            name=_get(info, "longName", "shortName", as_=str),
+            sector=_get(info, "sector", as_=str),
+            per=per,
+            forward_per=_get(info, "forwardPE", as_=float),
+            pbr=pbr,
+            peg=_get(info, "pegRatio", "trailingPegRatio", as_=float),
+            dividend_yield=_get(info, "dividendYield", as_=float),
+            roe=_get(info, "returnOnEquity", as_=float),
+            revenue_growth_yoy=_get(info, "revenueGrowth", as_=float),
+            earnings_growth_yoy=_get(info, "earningsGrowth", as_=float),
+            operating_margin=_get(info, "operatingMargins", as_=float),
+            profit_margin=_get(info, "profitMargins", as_=float),
+            free_cash_flow=_get(info, "freeCashflow", as_=float),
+            market_cap=_get(info, "marketCap", as_=float),
+            source="yfinance+pykrx" if (per or pbr) else "yfinance",
+        )
+
+    def _fetch_fundamentals_pykrx(self, code: str) -> dict[str, float | None]:
+        from pykrx.stock import get_market_fundamental, get_nearest_business_day_in_a_week
+
+        try:
+            day = get_nearest_business_day_in_a_week()
+            df = get_market_fundamental(day, day, code)
+            if df.empty:
+                return {}
+            row = df.iloc[-1]
+            return {
+                "per": float(row["PER"]) if row.get("PER") and row["PER"] != 0 else None,
+                "pbr": float(row["PBR"]) if row.get("PBR") and row["PBR"] != 0 else None,
+            }
+        except (ConnectionError, TimeoutError, ValueError, KeyError, IndexError, OSError) as e:
+            _logger.warning("pykrx fundamental 실패: %s (%s)", code, e)
+            return {}
+
+    # ─── news ───
+
+    def get_news(self, ticker: str, *, days: int = 30) -> list[News]:
+        code = self._normalize_code(ticker)
+        symbol = self.to_yfinance_symbol(code)
+        try:
+            raw = UsAdapter()._fetch_news(symbol)
+        except (ConnectionError, TimeoutError, OSError) as e:
+            _logger.warning("KR news 실패: %s (%s)", code, e)
+            return []
+        cutoff = datetime.now(UTC) - timedelta(days=days)
+        out: list[News] = []
+        for item in raw:
+            content: dict[str, Any] = item.get("content", item) if isinstance(item, dict) else {}
+            if not content:
+                continue
+            ts = content.get("pubDate") or content.get("providerPublishTime")
+            published = _parse_news_time(ts) if ts is not None else None
+            if published is None or published < cutoff:
+                continue
+            title = str(content.get("title", "")).strip()
+            url = str(
+                (content.get("canonicalUrl") or {}).get("url")
+                or (content.get("clickThroughUrl") or {}).get("url")
+                or content.get("link", "")
+            )
+            if not title or not url:
+                continue
+            out.append(News(title=title, url=url, published_at=published))
+        return out
+
+    # ─── disclosures (DART) ───
+
+    def get_disclosures(self, ticker: str, *, days: int = 30) -> list[Disclosure]:
+        if settings.dart_api_key is None:
+            return []
+        code = self._normalize_code(ticker)
+        end = datetime.now(UTC).date()
+        start = end - timedelta(days=days)
+        cache_name = f"dart-{code}-{end.strftime('%Y%m%d')}-{days}"
+        cached = load_json(cache_name, _DISCLOSURE_TTL)
+        if cached is not None:
+            return [Disclosure(**d) for d in cached]
+        items = self._fetch_disclosures_dart(code, start, end)
+        save_json(cache_name, [d.model_dump(mode="json") for d in items])
+        return items
+
+    def _fetch_disclosures_dart(
+        self, code: str, start: object, end: object
+    ) -> list[Disclosure]:
+        try:
+            import OpenDartReader
+        except ImportError:
+            _logger.warning("OpenDartReader 미설치 — 공시 생략")
+            return []
+
+        api_key = settings.dart_api_key
+        if api_key is None:
+            return []
+        try:
+            dart = OpenDartReader(api_key.get_secret_value())
+            df = dart.list(code, start=str(start), end=str(end))
+        except (ConnectionError, TimeoutError, ValueError, OSError) as e:
+            _logger.warning("DART 호출 실패: %s (%s)", code, e)
+            return []
+        if df is None or df.empty:
+            return []
+        out: list[Disclosure] = []
+        for _, row in df.iterrows():
+            try:
+                published = datetime.strptime(str(row.get("rcept_dt", "")), "%Y%m%d").replace(
+                    tzinfo=UTC
+                )
+            except ValueError:
+                continue
+            out.append(
+                Disclosure(
+                    rcept_no=str(row.get("rcept_no", "")),
+                    title=str(row.get("report_nm", "")),
+                    published_at=published,
+                    report_code=str(row.get("pblntf_ty", "")) or None,
+                    url=f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={row.get('rcept_no')}",
+                )
+            )
+        return out

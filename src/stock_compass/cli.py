@@ -37,9 +37,31 @@ def score(
         str | None, typer.Option("--market", "-m", help="kr / us (자동 감지가 기본)")
     ] = None,
 ) -> None:
-    """단일 종목의 5팩터 점수 + 종합 점수 출력 (Phase 1)."""
-    _ = (ticker, market)
-    raise NotImplementedError("score 명령은 Phase 1에서 구현됩니다.")
+    """단일 종목의 5팩터 점수 + 종합 점수 출력."""
+    from stock_compass.config import settings
+    from stock_compass.markets.base import Market
+    from stock_compass.output.terminal import render_single_score
+    from stock_compass.scoring import ScoringEngine
+    from stock_compass.utils.logging import setup_logging
+
+    setup_logging(settings.log_dir)
+
+    market_norm: Market | None = None
+    if market is not None:
+        m = market.upper()
+        if m not in ("KR", "US"):
+            console.print(f"[red]지원하지 않는 시장: {market!r} (kr / us 만 허용)[/red]")
+            raise typer.Exit(code=2)
+        market_norm = m  # type: ignore[assignment]
+
+    with console.status(f"[cyan]{ticker}[/cyan] 점수 계산 중…", spinner="dots"):
+        try:
+            result = ScoringEngine().analyze(ticker, market=market_norm)
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(code=1) from e
+
+    render_single_score(result, console=console)
 
 
 @app.command()

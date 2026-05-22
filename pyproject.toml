@@ -16,6 +16,8 @@ dependencies = [
   "pandas>=2.2",
   "numpy>=2.0",
   "pandas-market-calendars>=4.4",
+  "pyarrow>=17.0",
+  "setuptools>=70,<80",  # pykrx가 pkg_resources 의존 — setuptools 80+에서 제거됨
   # LLM
   "anthropic>=0.40.0",
   # CLI / UI
@@ -77,6 +79,8 @@ select = [
 ignore = [
   "PLR0913", # too many arguments — factor 함수에서 흔함
   "PLR2004", # magic value — 점수 임계치 등
+  "PLR0911", # too many returns — piecewise 점수 함수에서 자연스러움
+  "PLC0415", # lazy import — yfinance/pykrx/OpenDartReader 등 무거운 의존성 의도적 지연 로드
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -91,7 +95,14 @@ warn_redundant_casts = true
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["yfinance.*", "pykrx.*", "fredapi.*", "OpenDartReader.*", "pandas_market_calendars.*"]
+module = [
+  "yfinance.*",
+  "pykrx.*",
+  "fredapi.*",
+  "OpenDartReader.*",
+  "pandas_market_calendars.*",
+  "pandas.*",
+]
 ignore_missing_imports = true
 
 # ──────────────── pytest ────────────────
