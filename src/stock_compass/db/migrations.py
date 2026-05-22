@@ -10,6 +10,8 @@ from pathlib import Path
 from stock_compass.db.schema import (
     MIGRATION_001_INITIAL,
     MIGRATION_002_HYBRID_SENTIMENT,
+    MIGRATION_003_SCREENER,
+    SCREENER_VIEWS_DDL,
 )
 from stock_compass.utils.logging import get_logger
 
@@ -26,6 +28,11 @@ class Migration:
 MIGRATIONS: Sequence[Migration] = (
     Migration(version=1, name="initial", sql=MIGRATION_001_INITIAL),
     Migration(version=2, name="hybrid_sentiment", sql=MIGRATION_002_HYBRID_SENTIMENT),
+    Migration(
+        version=3,
+        name="screener",
+        sql=MIGRATION_003_SCREENER + "\n" + SCREENER_VIEWS_DDL,
+    ),
 )
 
 

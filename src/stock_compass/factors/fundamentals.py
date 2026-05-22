@@ -86,6 +86,7 @@ def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
             "roe": fund.roe,
             "operating_margin": fund.operating_margin,
             "profit_margin": fund.profit_margin,
+            "market_cap": fund.market_cap,
             "component_scores": components,
         },
         note=f"사용 지표 {len(components)}개: {', '.join(components)}",

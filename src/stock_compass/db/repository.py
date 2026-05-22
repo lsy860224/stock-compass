@@ -55,19 +55,36 @@ def upsert_ticker(
     currency: str,
     yfinance_symbol: str,
 ) -> int:
-    """tickers 테이블에 upsert 후 id 반환. name 누락 시 code로 대체."""
-    conn.execute(
-        """
-        INSERT INTO tickers (code, market, name, sector, currency, yfinance_symbol)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(market, code) DO UPDATE SET
-          name = COALESCE(excluded.name, tickers.name),
-          sector = COALESCE(excluded.sector, tickers.sector),
-          currency = excluded.currency,
-          yfinance_symbol = excluded.yfinance_symbol
-        """,
-        (code, market, name or code, sector, currency, yfinance_symbol),
-    )
+    """tickers 테이블에 upsert 후 id 반환.
+
+    name=None이면 INSERT 시 code를 fallback으로 사용하되 기존 name은 덮어쓰지 않음
+    (워치리스트 자동 갱신이 score/batch가 채워놓은 정식 종목명을 잃지 않도록).
+    """
+    if name is None:
+        conn.execute(
+            """
+            INSERT INTO tickers (code, market, name, sector, currency, yfinance_symbol)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(market, code) DO UPDATE SET
+              sector = COALESCE(excluded.sector, tickers.sector),
+              currency = excluded.currency,
+              yfinance_symbol = excluded.yfinance_symbol
+            """,
+            (code, market, code, sector, currency, yfinance_symbol),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO tickers (code, market, name, sector, currency, yfinance_symbol)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(market, code) DO UPDATE SET
+              name = excluded.name,
+              sector = COALESCE(excluded.sector, tickers.sector),
+              currency = excluded.currency,
+              yfinance_symbol = excluded.yfinance_symbol
+            """,
+            (code, market, name, sector, currency, yfinance_symbol),
+        )
     row = conn.execute(
         "SELECT id FROM tickers WHERE market = ? AND code = ?", (market, code)
     ).fetchone()

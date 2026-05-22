@@ -152,3 +152,147 @@ CREATE INDEX IF NOT EXISTS idx_news_summaries_source ON news_summaries(ticker_id
 CREATE INDEX IF NOT EXISTS idx_news_summaries_batch ON news_summaries(batch_id);
 """
 
+
+MIGRATION_003_SCREENER = """
+-- 상장폐지 추적 (백테스트 survivorship bias 회피)
+ALTER TABLE tickers ADD COLUMN delisted_at TEXT;
+
+-- 유니버스 멤버십 (날짜별 이력 보존)
+CREATE TABLE IF NOT EXISTS universe_members (
+  universe_code TEXT NOT NULL,
+  ticker_id INTEGER NOT NULL REFERENCES tickers(id) ON DELETE CASCADE,
+  as_of_date TEXT NOT NULL,
+  weight REAL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (universe_code, ticker_id, as_of_date)
+);
+CREATE INDEX IF NOT EXISTS idx_universe_code_date
+  ON universe_members(universe_code, as_of_date DESC);
+CREATE INDEX IF NOT EXISTS idx_universe_ticker
+  ON universe_members(ticker_id);
+
+-- 그룹별 워치리스트 (.env 단일 리스트의 확장)
+CREATE TABLE IF NOT EXISTS watchlists (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticker_id INTEGER NOT NULL REFERENCES tickers(id) ON DELETE CASCADE,
+  group_name TEXT NOT NULL DEFAULT 'core',
+  added_at TEXT NOT NULL DEFAULT (datetime('now')),
+  added_by TEXT NOT NULL DEFAULT 'manual',
+  notes TEXT,
+  UNIQUE(ticker_id, group_name)
+);
+
+-- 스크리너 실행 감사 로그
+CREATE TABLE IF NOT EXISTS screener_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_at TEXT NOT NULL DEFAULT (datetime('now')),
+  preset_name TEXT,
+  sql_text TEXT NOT NULL,
+  result_count INTEGER NOT NULL,
+  result_tickers TEXT NOT NULL,
+  elapsed_ms INTEGER NOT NULL,
+  is_backtest INTEGER NOT NULL DEFAULT 0,
+  backtest_period TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_screener_runs_time
+  ON screener_runs(run_at DESC);
+"""
+
+
+# Phase 7 뷰 — 마이그레이션 003 이후 별도 실행. 뷰는 idempotent하게 DROP+CREATE.
+SCREENER_VIEWS_DDL = """
+DROP VIEW IF EXISTS v_latest_scores;
+CREATE VIEW v_latest_scores AS
+WITH latest AS (
+  SELECT ticker_id, MAX(date) AS d
+  FROM composite_scores
+  GROUP BY ticker_id
+),
+lc AS (
+  SELECT cs.ticker_id, cs.date, cs.total_score, cs.verdict,
+         cs.price_at_score, cs.sentiment_source
+  FROM composite_scores cs
+  JOIN latest l ON cs.ticker_id = l.ticker_id AND cs.date = l.d
+),
+lf AS (
+  SELECT
+    fs.ticker_id,
+    MAX(CASE WHEN factor_name='valuation' THEN score END) AS valuation_score,
+    MAX(CASE WHEN factor_name='fundamentals' THEN score END) AS fundamentals_score,
+    MAX(CASE WHEN factor_name='technical' THEN score END) AS technical_score,
+    MAX(CASE WHEN factor_name='macro' THEN score END) AS macro_score,
+    MAX(CASE WHEN factor_name='sentiment' THEN score END) AS sentiment_score,
+    MAX(CASE WHEN factor_name='valuation'
+             THEN json_extract(raw_values, '$.per') END) AS per,
+    MAX(CASE WHEN factor_name='valuation'
+             THEN json_extract(raw_values, '$.pbr') END) AS pbr,
+    MAX(CASE WHEN factor_name='valuation'
+             THEN json_extract(raw_values, '$.peg') END) AS peg,
+    MAX(CASE WHEN factor_name='valuation'
+             THEN json_extract(raw_values, '$.dividend_yield') END) AS dividend_yield,
+    MAX(CASE WHEN factor_name='fundamentals'
+             THEN json_extract(raw_values, '$.roe') END) AS roe,
+    MAX(CASE WHEN factor_name='fundamentals'
+             THEN json_extract(raw_values, '$.revenue_growth_yoy') END) AS revenue_growth_yoy,
+    MAX(CASE WHEN factor_name='fundamentals'
+             THEN json_extract(raw_values, '$.operating_margin') END) AS operating_margin,
+    MAX(CASE WHEN factor_name='fundamentals'
+             THEN json_extract(raw_values, '$.market_cap') END) AS market_cap,
+    MAX(CASE WHEN factor_name='technical'
+             THEN json_extract(raw_values, '$.rsi_14') END) AS rsi_14,
+    MAX(CASE WHEN factor_name='technical'
+             THEN json_extract(raw_values, '$.ma200_distance') END) AS ma200_distance,
+    MAX(CASE WHEN factor_name='technical'
+             THEN json_extract(raw_values, '$.volume_zscore') END) AS volume_zscore
+  FROM factor_scores fs
+  JOIN latest l ON fs.ticker_id = l.ticker_id AND fs.date = l.d
+  GROUP BY fs.ticker_id
+)
+SELECT
+  t.id AS ticker_id, t.code, t.name, t.market, t.sector,
+  lc.price_at_score AS price,
+  lc.total_score AS composite_score,
+  lc.verdict, lc.sentiment_source,
+  lf.valuation_score, lf.fundamentals_score, lf.technical_score,
+  lf.macro_score, lf.sentiment_score,
+  lf.per, lf.pbr, lf.peg, lf.dividend_yield,
+  lf.roe, lf.revenue_growth_yoy, lf.operating_margin, lf.market_cap,
+  lf.rsi_14, lf.ma200_distance, lf.volume_zscore,
+  lc.date AS as_of_date,
+  COALESCE(
+    (SELECT GROUP_CONCAT(universe_code) FROM universe_members um
+      WHERE um.ticker_id = t.id),
+    ''
+  ) AS universes
+FROM tickers t
+JOIN lc ON lc.ticker_id = t.id
+LEFT JOIN lf ON lf.ticker_id = t.id
+WHERE t.delisted_at IS NULL OR t.delisted_at > lc.date;
+
+
+DROP VIEW IF EXISTS v_score_history;
+CREATE VIEW v_score_history AS
+SELECT
+  t.id AS ticker_id, t.code, t.name, t.market,
+  cs.date, cs.total_score AS composite_score, cs.verdict,
+  MAX(CASE WHEN fs.factor_name='valuation' THEN fs.score END) AS valuation_score,
+  MAX(CASE WHEN fs.factor_name='fundamentals' THEN fs.score END) AS fundamentals_score,
+  MAX(CASE WHEN fs.factor_name='technical' THEN fs.score END) AS technical_score,
+  MAX(CASE WHEN fs.factor_name='macro' THEN fs.score END) AS macro_score,
+  MAX(CASE WHEN fs.factor_name='sentiment' THEN fs.score END) AS sentiment_score
+FROM tickers t
+JOIN composite_scores cs ON t.id = cs.ticker_id
+LEFT JOIN factor_scores fs ON t.id = fs.ticker_id AND cs.date = fs.date
+GROUP BY t.id, cs.date;
+
+
+DROP VIEW IF EXISTS v_universe;
+CREATE VIEW v_universe AS
+SELECT
+  um.universe_code, um.ticker_id, t.code, t.name, t.market,
+  um.as_of_date, um.weight
+FROM universe_members um
+JOIN tickers t ON um.ticker_id = t.id;
+"""
+
+

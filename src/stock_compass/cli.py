@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from rich.progress import Progress
 
     from stock_compass.scoring import CompositeScore, ScoringEngine
+    from stock_compass.screener import PresetInfo
 
 _MARKET_VALUES = set(get_args(Market))
 
@@ -41,6 +42,8 @@ sentiment_app = typer.Typer(help="하이브리드 sentiment — API/Prompt/Impor
 app.add_typer(sentiment_app, name="sentiment")
 trade_app = typer.Typer(help="매매 일지 — 입력·조회·편향 분석.")
 app.add_typer(trade_app, name="trade")
+universe_app = typer.Typer(help="유니버스 — refresh / list.")
+app.add_typer(universe_app, name="universe")
 console = Console()
 
 
@@ -687,6 +690,287 @@ def trade_analyze(
         "[dim]힌트: 매수 평균 점수 > 70 → FOMO 추격 경향, "
         "< 50 → 역추세 저점 매수 경향. 본인 전략과 의도된 방향인지 검토.[/dim]"
     )
+
+
+@app.command()
+def screen(
+    preset: Annotated[
+        str | None, typer.Option("--preset", help="screeners/presets/<name>.sql")
+    ] = None,
+    file: Annotated[
+        Path | None, typer.Option("--file", "-f", help="저장된 .sql 파일")
+    ] = None,
+    sql: Annotated[
+        str | None, typer.Option("--sql", help="인라인 SQL")
+    ] = None,
+    limit: Annotated[
+        int | None, typer.Option("--limit", "-l", help="결과 행 수 (기본 50, 최대 5000)")
+    ] = None,
+    output_format: Annotated[
+        str, typer.Option("--format", help="table / csv / json")
+    ] = "table",
+    out: Annotated[
+        Path | None, typer.Option("--out", help="csv/json은 파일로 저장 (미지정 시 stdout)")
+    ] = None,
+    list_presets_flag: Annotated[
+        bool, typer.Option("--list-presets", help="사용 가능한 프리셋 목록")
+    ] = False,
+    list_fields_flag: Annotated[
+        bool, typer.Option("--list-fields", help="v_latest_scores 칼럼 치트시트")
+    ] = False,
+) -> None:
+    """SQL 스크리너 — RO 모드 + LIMIT 강제 + 안전 검증."""
+    from stock_compass.config import settings
+    from stock_compass.output.screener import (
+        export_to_file,
+        render_csv,
+        render_json,
+        render_table,
+    )
+    from stock_compass.screener import (
+        PresetNotFoundError,
+        ScreenerEngine,
+        ScreenerError,
+        list_presets,
+        load_preset,
+    )
+    from stock_compass.utils.logging import setup_logging
+
+    setup_logging(settings.log_dir)
+
+    if list_presets_flag:
+        _print_preset_catalog(list_presets())
+        return
+    if list_fields_flag:
+        _print_field_cheatsheet()
+        return
+
+    # 진입점 우선순위: preset > file > sql
+    if preset:
+        try:
+            sql_text = load_preset(preset)
+            preset_name = preset
+        except PresetNotFoundError as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(code=2) from e
+    elif file:
+        if not file.exists():
+            console.print(f"[red]파일 없음: {file}[/red]")
+            raise typer.Exit(code=2)
+        sql_text = file.read_text(encoding="utf-8")
+        preset_name = None
+    elif sql:
+        sql_text = sql
+        preset_name = None
+    else:
+        console.print(
+            "[red]--preset / --file / --sql 중 하나는 필수입니다.[/red]"
+            "\n[dim]힌트: `stock-compass screen --list-presets`[/dim]"
+        )
+        raise typer.Exit(code=2)
+
+    try:
+        engine = ScreenerEngine()
+        result = engine.run_sql(sql_text, limit=limit, preset_name=preset_name)
+    except ScreenerError as e:
+        console.print(f"[red]스크리너 거부: {e}[/red]")
+        raise typer.Exit(code=1) from e
+
+    fmt = output_format.lower()
+    if fmt == "table":
+        render_table(result, console=console)
+    elif fmt == "csv":
+        body = render_csv(result)
+        if out:
+            export_to_file(body, out)
+            console.print(f"[green]✓[/green] CSV 저장: {out}")
+        else:
+            console.print(body)
+    elif fmt == "json":
+        body = render_json(result)
+        if out:
+            export_to_file(body, out)
+            console.print(f"[green]✓[/green] JSON 저장: {out}")
+        else:
+            console.print(body)
+    else:
+        console.print(f"[red]지원하지 않는 format: {fmt} (table/csv/json만)[/red]")
+        raise typer.Exit(code=2)
+
+
+@universe_app.command("refresh")
+def universe_refresh(
+    code: Annotated[
+        str | None,
+        typer.Option(
+            "--code",
+            help="갱신할 universe (현재 지원: WATCHLIST; KOSPI_200/SP500 등은 TODO)",
+        ),
+    ] = None,
+) -> None:
+    """유니버스 멤버 갱신 — 현재는 WATCHLIST(.env)만 즉시 가동."""
+    from stock_compass.config import settings
+    from stock_compass.db import get_db_connection
+    from stock_compass.screener.universes import (
+        UNIVERSE_WATCHLIST,
+        refresh_kospi_200,
+        refresh_sp500,
+        refresh_watchlist,
+    )
+    from stock_compass.utils.logging import setup_logging
+
+    setup_logging(settings.log_dir)
+
+    target = (code or UNIVERSE_WATCHLIST).upper()
+    with get_db_connection() as conn:
+        if target == UNIVERSE_WATCHLIST:
+            r = refresh_watchlist(conn)
+        elif target == "KOSPI_200":
+            try:
+                r = refresh_kospi_200(conn)
+            except NotImplementedError as e:
+                console.print(f"[yellow]{e}[/yellow]")
+                raise typer.Exit(code=2) from e
+        elif target == "SP500":
+            try:
+                r = refresh_sp500(conn)
+            except NotImplementedError as e:
+                console.print(f"[yellow]{e}[/yellow]")
+                raise typer.Exit(code=2) from e
+        else:
+            console.print(f"[red]미지원 universe: {target}[/red]")
+            raise typer.Exit(code=2)
+
+    console.print(
+        f"[green]✓[/green] {r.universe_code}: {r.members}종목 등록 "
+        f"(as_of={r.as_of_date})"
+    )
+
+
+@universe_app.command("list")
+def universe_list(
+    code: Annotated[
+        str | None,
+        typer.Option("--code", help="특정 universe 멤버 (미지정 시 universe별 카운트)"),
+    ] = None,
+) -> None:
+    """유니버스 목록 또는 멤버 조회."""
+    from rich.table import Table
+
+    from stock_compass.config import settings
+    from stock_compass.db import get_db_connection
+    from stock_compass.screener.universes import list_universe_members
+    from stock_compass.utils.logging import setup_logging
+
+    setup_logging(settings.log_dir)
+
+    with get_db_connection() as conn:
+        rows = list_universe_members(conn, universe_code=code.upper() if code else None)
+
+    if not rows:
+        console.print("[yellow]등록된 universe 멤버 없음 — `universe refresh` 먼저.[/yellow]")
+        return
+
+    if code:
+        table = Table(title=f"{code.upper()} 멤버 ({len(rows)}종목)")
+        table.add_column("종목", style="cyan")
+        table.add_column("이름")
+        table.add_column("시장", justify="center")
+        table.add_column("기준일", style="dim")
+        for r in rows:
+            table.add_row(
+                str(r["code"]),
+                str(r["name"]),
+                str(r["market"]),
+                str(r["as_of_date"]),
+            )
+    else:
+        table = Table(title="등록된 universe 목록")
+        table.add_column("Universe", style="cyan")
+        table.add_column("멤버", justify="right")
+        table.add_column("최신 기준일", style="dim")
+        for r in rows:
+            table.add_row(
+                str(r["universe_code"]),
+                str(r["member_count"]),
+                str(r["latest_date"]),
+            )
+    console.print(table)
+
+
+def _print_preset_catalog(presets: list[PresetInfo]) -> None:
+    from rich.table import Table
+
+    if not presets:
+        console.print(
+            "[yellow]프리셋 없음 — screeners/presets/*.sql 확인.[/yellow]"
+        )
+        return
+    table = Table(title=f"사용 가능한 프리셋 ({len(presets)}개)")
+    table.add_column("이름", style="cyan")
+    table.add_column("설명", overflow="fold")
+    for p in presets:
+        table.add_row(p.name, p.description)
+    console.print(table)
+    console.print("[dim]사용: stock-compass screen --preset <name>[/dim]")
+
+
+def _print_field_cheatsheet() -> None:
+    from rich.table import Table
+
+    sections: list[tuple[str, list[tuple[str, str]]]] = [
+        (
+            "Valuation",
+            [
+                ("per", "PER (배)"),
+                ("pbr", "PBR (배)"),
+                ("peg", "PEG (배)"),
+                ("dividend_yield", "배당수익률 (0.03 = 3%)"),
+                ("market_cap", "시가총액 (현지 통화)"),
+                ("valuation_score", "Valuation 팩터 점수 0~100"),
+            ],
+        ),
+        (
+            "Fundamentals",
+            [
+                ("revenue_growth_yoy", "매출 성장률 YoY (0.10 = 10%)"),
+                ("operating_margin", "영업이익률"),
+                ("roe", "ROE (0.15 = 15%)"),
+                ("fundamentals_score", "Fundamentals 점수 0~100"),
+            ],
+        ),
+        (
+            "Technical",
+            [
+                ("rsi_14", "RSI(14)"),
+                ("ma200_distance", "200MA 이격률 (+0.05 = 5% 위)"),
+                ("volume_zscore", "20일 거래량 z-score"),
+                ("technical_score", "Technical 점수 0~100"),
+            ],
+        ),
+        (
+            "메타",
+            [
+                ("code", "종목 코드"),
+                ("name", "종목명"),
+                ("market", "KR / US"),
+                ("sector", "섹터"),
+                ("universes", "지수 멤버십 (CSV 문자열)"),
+                ("composite_score", "5팩터 가중평균 0~100"),
+                ("verdict", "관심권/중립/주의"),
+                ("price", "최신 종가"),
+                ("as_of_date", "데이터 기준일"),
+            ],
+        ),
+    ]
+
+    for title, items in sections:
+        table = Table(title=f"[{title}]")
+        table.add_column("필드", style="cyan")
+        table.add_column("설명", overflow="fold")
+        for name, desc in items:
+            table.add_row(name, desc)
+        console.print(table)
 
 
 def _parse_market(raw: str | None) -> Market | None:

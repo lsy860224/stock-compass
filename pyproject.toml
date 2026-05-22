@@ -80,6 +80,8 @@ ignore = [
   "PLR0913", # too many arguments — factor 함수에서 흔함
   "PLR2004", # magic value — 점수 임계치 등
   "PLR0911", # too many returns — piecewise 점수 함수에서 자연스러움
+  "PLR0912", # too many branches — CLI 명령에서 옵션 분기 흔함
+  "PLR0915", # too many statements — CLI 명령에서 옵션 분기 흔함
   "PLC0415", # lazy import — yfinance/pykrx/OpenDartReader 등 무거운 의존성 의도적 지연 로드
 ]
 
