@@ -1,0 +1,61 @@
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+.uv-cache/
+
+# ─── 빌드 ───
+build/
+dist/
+*.egg-info/
+*.egg
+
+# ─── 환경변수 (절대 커밋 금지) ───
+.env
+.env.*
+!.env.example
+
+# ─── 데이터 (개인) ───
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+data/cache/
+data/backups/
+data/craft_export/
+
+# ─── 로그 ───
+logs/
+*.log
+
+# ─── 테스트·린트 캐시 ───
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+
+# ─── IDE ───
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ─── macOS ───
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ─── 임시 ───
+tmp/
+temp/
+*.bak
+*.tmp
