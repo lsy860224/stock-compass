@@ -259,45 +259,94 @@ CLAUDE.md 10) + docs/CRAFT_TEMPLATE.md 참고:
 
 ---
 
-## Phase 4: 뉴스·공시 요약 (Claude API) (Day 5, 4시간)
+## Phase 4: 뉴스·공시 요약 (하이브리드 모드) (Day 5, 5시간)
+
+> **하이브리드 sentiment 모드 구현** — 워치리스트는 API 자동, 외부 분석은 Prompt 수동.
+> 상세 스펙: `docs/HYBRID_SENTIMENT.md`
 
 ### Claude Code 프롬프트
 
 ```
-CLAUDE.md 12) 비용·법률 주의사항 + DATA_SOURCES.md 참고:
+CLAUDE.md 12) 비용·법률 + 15) 하이브리드 모드 + docs/HYBRID_SENTIMENT.md 참고:
 
-1. src/stock_compass/llm/summarizer.py:
+1. src/stock_compass/llm/summarizer.py (API 경로):
    - ClaudeSummarizer 클래스
    - summarize_news(ticker, news_items: list[News]) -> NewsSummary
    - summarize_disclosures(ticker, disclosures: list[Disclosure]) -> DisclosureSummary
-   - 모델: claude-sonnet-4-6 (또는 claude-haiku-4-5로 비용 절약)
-   - 시스템 프롬프트: "당신은 금융 뉴스 분석가다. 객관적 사실만 추출. 추측 금지. 톤(긍정/부정/중립)만 분류."
-   - 출력 형식: JSON (요약 3줄 + 톤 점수 -10~+10 + 핵심 키워드 5개)
+   - 모델: claude-haiku-4-5-20251001 기본 (워치리스트용)
+   - 시스템 프롬프트: docs/DATA_SOURCES.md에 명시된 양식
+   - 출력: JSON (요약 3줄 + 톤 -10~+10 + 키워드 5개)
+   - 비용 추적: tokens_used 기록 + 일 한도 (ANTHROPIC_DAILY_INPUT_LIMIT)
+   - 한도 초과 시: sentiment 50점 (fallback) + 로그 + 'fallback' source
 
-2. src/stock_compass/factors/sentiment.py 실제 구현:
-   - 지난 30일 뉴스·공시 수집 (markets.get_news + get_disclosures)
-   - Claude 요약 → 톤 점수 평균
-   - DB news_summaries 테이블에 캐싱 (같은 source URL은 재사용)
-   - 캐시 hit 시 API 호출 생략
+2. src/stock_compass/output/prompt_generator.py (Prompt 경로):
+   - PromptGenerator 클래스
+   - generate_sentiment_prompt(tickers, days) -> Path
+   - 출력 위치: data/prompts/YYYYMMDD-sentiment-<batch_id>.md
+   - 형식: docs/HYBRID_SENTIMENT.md 3.3절 그대로
+   - 한 파일에 종목 5~10개씩 분할 (Claude.ai 한도 고려)
+   - batch_id 자동 부여 (YYYYMMDD-HHMMSS-<hash>)
 
-3. 비용 관리:
-   - 일 1만 토큰 한도 (config에서 조정 가능)
-   - 한도 초과 시 sentiment 50점 + 경고 로그
-   - 토큰 사용량 DB에 기록 (debug용)
+3. src/stock_compass/llm/prompt_importer.py (응답 파싱):
+   - import_response(file_path, batch_id) -> ImportResult
+   - 정규식으로 JSON 코드블록 추출
+   - Pydantic 검증 (batch_id 일치, results 배열 형식)
+   - 30단어 이상 인용 자동 감지 (단어 수 체크) → 경고
+   - DB 저장: news_summaries.source='manual_prompt'
 
-4. CLI:
-   - stock-compass news AAPL --days 7 (개별 뉴스 요약 보기)
-   - score/batch 실행 시 자동으로 sentiment factor 활성화
+4. src/stock_compass/factors/sentiment.py 갱신:
+   - SENTIMENT_MODE 환경변수에 따라 분기
+   - 'api': summarizer 호출
+   - 'prompt': prompt_generator 호출 후 즉시 종료 + 사용자 안내
+   - 'hybrid': 
+     * scope='watchlist' → API
+     * scope='screener' 또는 명시적 prompt 요청 → Prompt 파일 생성
 
-5. 면책:
-   - 모든 요약에 "AI 생성 요약. 원문 확인 필수." footer
+5. cli.py 확장:
+   - stock-compass sentiment prompt --tickers 005930,035720 --days 7
+     → Prompt MD 생성
+   - stock-compass sentiment import --file ~/Downloads/response.txt --batch-id <id>
+     → 응답 파싱 → DB
+   - stock-compass sentiment status
+     → 일일 토큰 사용량 + 한도 / Prompt 대기 중인 batch 목록
+   - stock-compass news 005930 --days 7 (개별 뉴스 보기, sentiment 모드 따름)
+
+6. DB 스키마 갱신:
+   - news_summaries.source 칼럼 추가 (마이그레이션 002)
+   - composite_scores.sentiment_source 칼럼 추가
+   - daily_token_usage 테이블 신설 (date, input_tokens, output_tokens, model, mode)
+
+7. 면책:
+   - 모든 요약 출력에 "AI 생성 요약. 원문 확인 필수." footer
+   - Prompt 모드 응답에도 동일 footer 자동 삽입
 
 테스트:
-- tests/test_llm/test_summarizer.py: Anthropic SDK mock으로 호출 형식만 검증
-- 실제 API 호출 테스트는 별도 마커 (pytest -m integration)
+- tests/test_llm/test_summarizer.py: Anthropic SDK mock 검증
+- tests/test_llm/test_prompt_importer.py: 다양한 JSON 형식 파싱 (정상/누락/잘못된 batch_id)
+- tests/test_output/test_prompt_generator.py: MD 템플릿 snapshot
+- 30단어 인용 감지 boundary test (29단어 OK, 30단어 경고, 50단어 차단)
 ```
 
-✅ Commit: `feat: news/disclosure summarization via Claude API`
+### 검증
+
+```bash
+# 모드 1: API
+SENTIMENT_MODE=api uv run stock-compass score AAPL
+# → factor_scores.sentiment에 source='api'
+
+# 모드 2: Prompt 생성
+uv run stock-compass sentiment prompt --tickers 005930,035720 --days 7
+# → data/prompts/2026-05-22-...md 출력 경로 표시
+
+# 모드 3: Prompt import (수동 응답 파일로 테스트)
+uv run stock-compass sentiment import --file tests/fixtures/sample_response.txt --batch-id <id>
+# → DB news_summaries에 source='manual_prompt'로 저장 확인
+
+# 사용량 확인
+uv run stock-compass sentiment status
+```
+
+✅ Commit: `feat: hybrid sentiment (API + manual prompt) + cost guards`
 
 ---
 
@@ -401,7 +450,194 @@ CLAUDE.md 11) + macOS launchd 표준:
 
 ---
 
-## Phase 7 (선택): Streamlit 로컬 대시보드 (Day 8+, 4시간)
+## Phase 7: 종목 스크리너 (Day 8~9, 약 16시간 = 2일)
+
+> 상세 스펙: `docs/SCREENER_SPEC.md`
+> SQL DSL + 사전 정의 뷰 + 백테스트 + 5개 진입점 (preset/file/sql/interactive/screen)
+
+### Phase 7-1. 뷰 + 유니버스 테이블 (Day 8 오전, 4시간)
+
+```
+docs/SCREENER_SPEC.md 3) (뷰 카탈로그) + 8) (유니버스) 참고:
+
+1. supabase/migrations/003_screener.sql (또는 db/migrations.py에 추가):
+   - 테이블 신설:
+     * universe_members (universe_code, ticker_id, as_of_date, weight) PK 3개
+     * tickers.delisted_at 칼럼 추가 (survivorship bias)
+   - 뷰 생성 (CREATE VIEW):
+     * v_latest_scores: SCREENER_SPEC 3.1 모든 칼럼
+     * v_score_history: 일자별 점수 추이
+     * v_universe: universe_members JOIN tickers
+     * v_forward_return: 백테스트용 수익률
+   - v_at_date는 SQLite 뷰가 아니라 Python 측에서 CTE로 동적 생성
+   - 인덱스: universe_members(universe_code, as_of_date)
+
+2. src/stock_compass/screener/views.py:
+   - 모든 뷰 DDL을 Python 상수로 (마이그레이션과 동일)
+   - rebuild_views() 함수 (스키마 변경 시)
+
+테스트:
+- tests/test_screener/test_views.py: 메모리 SQLite에 데이터 시드 후 뷰 조회 검증
+```
+
+### Phase 7-2. 유니버스 자동 갱신 (Day 8 오후, 4시간)
+
+```
+SCREENER_SPEC 8) 참고:
+
+1. src/stock_compass/screener/universes/kr.py:
+   - refresh_kospi_200() → pykrx.stock.get_index_portfolio_deposit_file("1028")
+   - refresh_kosdaq_150() → "2203"
+   - refresh_all_kr() → KOSPI + KOSDAQ 전체
+   - 결과를 universe_members 테이블에 upsert
+   - as_of_date는 KR 영업일 기준
+
+2. src/stock_compass/screener/universes/us.py:
+   - refresh_sp500() → Wikipedia 'List_of_S%26P_500_companies' 스크래핑
+   - refresh_nasdaq_100() → Wikipedia
+   - refresh_dow30() → Wikipedia
+   - 주의: Wikipedia 스크래핑은 robots.txt 준수, 주 1회 갱신
+   - User-Agent: "stock-compass/0.1 (Personal use)"
+
+3. cli.py에 universe 명령:
+   - stock-compass universe refresh (전체)
+   - stock-compass universe refresh --code KOSPI_200
+   - stock-compass universe list (현재 멤버 + 갱신일)
+
+4. launchd plist 추가:
+   - 매일 06:00 KST에 universe refresh 자동 실행 (KR)
+   - 매주 일요일 07:00 KST에 US 갱신
+
+테스트:
+- KR: pykrx mock으로 200종목 시뮬레이션
+- US: 캐시된 HTML fixture로 파싱 검증
+```
+
+### Phase 7-3. SQL 실행 엔진 (Day 9 오전, 3시간)
+
+```
+SCREENER_SPEC 10) 안전장치 + 5) 사용 흐름 참고:
+
+1. src/stock_compass/screener/engine.py:
+   - ScreenerEngine 클래스
+   - __init__(db_path): RO 모드로 연결 (sqlite3.connect(f"file:{db}?mode=ro", uri=True))
+   - run_sql(sql: str, params: dict | None = None, limit: int | None = None) -> ScreenerResult
+   - 자동 LIMIT 적용 (없으면 50, 최대 5000 강제)
+   - 쿼리 타임아웃 5초 (PRAGMA + signal SIGALRM)
+   - 결과: ScreenerResult = pydantic 모델 (rows, columns, row_count, sql, elapsed_ms)
+
+2. SQL 안전 검증:
+   - 위험 키워드 차단 (사전 검사): DROP, DELETE, UPDATE, INSERT, ALTER, ATTACH, PRAGMA write
+   - mode=ro도 있지만 사전 거부가 명확한 에러 메시지 제공
+   - 예외 시 친절한 에러 (어느 토큰이 문제인지)
+
+3. v_at_date(:date) 동적 처리:
+   - 사용자 쿼리에서 'v_at_date(' 검출 시 :date 파라미터 추출
+   - 해당 날짜 기준 CTE로 변환 후 실행
+   - 미래 날짜 차단 (today 이후 거부)
+
+테스트:
+- 위험 키워드 차단 (DROP TABLE 시도 → 에러)
+- LIMIT 자동 적용
+- 타임아웃 (느린 쿼리 → 5초 후 종료)
+- v_at_date 동작
+```
+
+### Phase 7-4. CLI + 프리셋 (Day 9 오후, 4시간)
+
+```
+SCREENER_SPEC 2) (사용 흐름) + 5) (프리셋) 참고:
+
+1. cli.py 'screen' 명령 확장:
+   - stock-compass screen --preset <name>           # 진입점 A
+   - stock-compass screen --file screeners/x.sql    # 진입점 B
+   - stock-compass screen --sql "SELECT ..."        # 진입점 C
+   - stock-compass screen --interactive              # 진입점 D
+   - stock-compass screen --list-presets
+   - stock-compass screen --list-fields              # 뷰 칼럼 치트시트
+   - 공통 옵션:
+     - --limit N
+     - --format table|csv|json
+     - --add-to-watchlist [--group <name>]
+     - --to-craft
+     - --prompt-deepdive  (하이브리드 sentiment 트리거)
+
+2. src/stock_compass/screener/presets.py:
+   - 6개 프리셋 SQL을 패키지 리소스로 포함 (importlib.resources)
+   - load_preset(name) -> str
+   - list_presets() -> list[PresetInfo]
+
+3. screeners/presets/ 디렉토리에 6개 .sql:
+   - deep_value_kr.sql
+   - value_growth_kr.sql
+   - momentum_us.sql
+   - oversold_quality_global.sql
+   - turnaround.sql
+   - high_dividend_kr.sql
+   (SCREENER_SPEC 5)의 SQL 그대로)
+
+4. 결과 출력 (output/exporter.py):
+   - terminal: rich.table (자동 컬럼 정렬)
+   - csv: pandas to_csv
+   - json: orient='records'
+   - craft: data/craft_export/screening-YYYYMMDD-<name>.md
+   - 모든 출력 하단에 SCREENER_SPEC 11) 한계 명시 자동 삽입
+
+5. --add-to-watchlist:
+   - watchlists 테이블 신설 (그룹별 워치리스트, ticker_id 다대다)
+   - .env의 WATCHLIST_KR/US와 병합하여 다음 batch부터 추적
+
+6. --prompt-deepdive:
+   - 결과 종목들로 sentiment Prompt MD 자동 생성
+   - data/prompts/YYYYMMDD-deepdive-<name>.md
+   - 하이브리드 모드의 핵심 트리거
+
+테스트:
+- 6개 프리셋 모두 실행 (시드 데이터 기반)
+- --add-to-watchlist 통합 테스트
+- --prompt-deepdive로 MD 생성 확인
+```
+
+### Phase 7-5. 백테스트 엔진 (선택, +5시간)
+
+```
+SCREENER_SPEC 6) 참고:
+
+1. src/stock_compass/screener/backtest.py:
+   - run_backtest(preset_or_sql, start, end, rebalance, forward_period) -> BacktestReport
+   - 매 rebalance 시점에 v_at_date(:date)로 쿼리 → 종목 리스트
+   - forward_period 후 가격 변화 측정 (snapshots 테이블)
+   - 결과: BacktestReport (시점별 종목 + 평균 수익률 + 적중률 + MDD)
+
+2. 안전장치:
+   - Survivorship bias: tickers.delisted_at <= :date 종목은 유니버스에서 제외
+   - Look-ahead bias: v_at_date 강제 사용 (현재 값 X)
+   - 거래비용·세금: report에 "미반영" 명시
+
+3. cli.py 백테스트 옵션:
+   - stock-compass screen --preset value_growth_kr --backtest --start 2025-01-01 --end 2026-05-22 --rebalance monthly --forward-period 3m
+   - 결과 → 콘솔 + data/backtests/<name>-<timestamp>.json
+
+테스트:
+- 시드 데이터로 1년치 백테스트
+- 상장폐지 종목 제외 검증
+```
+
+### Phase 7-6. 인터랙티브 REPL (선택, +2시간)
+
+```
+SCREENER_SPEC 9) 참고:
+- prompt_toolkit 또는 rich.prompt 사용
+- 명령 자동완성 (.views, .fields, .preset 등)
+- 마지막 결과 변수 (.last)
+- SQL syntax highlighting (선택)
+```
+
+✅ Commit: `feat: SQL screener (Phase 7) with universes + presets + backtest`
+
+---
+
+## Phase 8 (선택): Streamlit 로컬 대시보드 (Day 10+, 4시간)
 
 ```
 streamlit run dashboard.py:

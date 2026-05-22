@@ -12,10 +12,14 @@ tickers (마스터)
   ├── 1:N → snapshots          (일별 OHLCV)
   ├── 1:N → factor_scores      (일별 팩터별 점수)
   ├── 1:N → composite_scores   (일별 종합 점수)
-  ├── 1:N → news_summaries     (Claude 요약)
+  ├── 1:N → news_summaries     (Claude 요약 — api/manual_prompt/fallback)
   ├── 1:N → alerts             (발화 이력)
-  └── 1:N → trades             (본인 매매 일지)
+  ├── 1:N → trades             (본인 매매 일지)
+  ├── 1:N → universe_members   (지수 멤버십, Phase 7)
+  └── 1:N → watchlists         (워치리스트 그룹, Phase 7)
 
+daily_token_usage (Anthropic 비용 추적, Phase 4)
+screener_runs (스크리너 실행 이력, Phase 7)
 schema_version (마이그레이션 추적)
 ```
 
@@ -143,12 +147,14 @@ Claude 요약 결과 캐시.
 | ticker_id | INTEGER | NOT NULL FK→tickers.id | |
 | source_url | TEXT | NOT NULL | 원문 URL (중복 방지 키) |
 | source_type | TEXT | NOT NULL CHECK(source_type IN ('news','disclosure')) | |
+| source | TEXT | NOT NULL CHECK(source IN ('api','manual_prompt','fallback')) DEFAULT 'api' | 어느 경로로 생성됐는가 |
 | published_at | TEXT | NOT NULL | 원문 발행 ISO 8601 |
 | summary | TEXT | NOT NULL | Claude 요약 (3줄, 자체 표현) |
 | tone_score | REAL | NOT NULL CHECK(tone_score BETWEEN -10 AND 10) | 부정~긍정 |
 | keywords | TEXT | NULL | JSON array |
-| tokens_used | INTEGER | NULL | 비용 추적 |
-| model | TEXT | NOT NULL | 'claude-sonnet-4-6' 등 |
+| tokens_used | INTEGER | NULL | 비용 추적 (api만) |
+| model | TEXT | NOT NULL | 'claude-haiku-4-5-...' 또는 'manual_claude_ai' |
+| batch_id | TEXT | NULL | 하이브리드 import 시 batch 추적 |
 | created_at | TEXT | NOT NULL DEFAULT (datetime('now')) | |
 
 **제약**: `UNIQUE(ticker_id, source_url)`
@@ -395,4 +401,289 @@ WHERE ticker_id = :ticker_id
   AND trigger_type = :trigger_type
   AND fired_at > datetime('now', '-24 hours')
 LIMIT 1;
+```
+
+---
+
+## Phase 4 신규 테이블 — 하이브리드 Sentiment
+
+### `daily_token_usage`
+
+Anthropic API 일일 사용량 추적 (비용 안전장치).
+
+| 칼럼 | 타입 | 설명 |
+|---|---|---|
+| id | INTEGER | PK AUTOINCREMENT |
+| date | TEXT | YYYY-MM-DD (KST 기준) |
+| model | TEXT | claude-haiku-4-5 / sonnet-4-6 등 |
+| mode | TEXT | api / manual_prompt |
+| input_tokens | INTEGER | 누적 입력 토큰 |
+| output_tokens | INTEGER | 누적 출력 토큰 |
+| call_count | INTEGER | 호출 횟수 |
+| estimated_cost_usd | REAL | 예상 비용 (모델별 가격 적용) |
+| updated_at | TEXT | DEFAULT (datetime('now')) |
+
+**제약**: `UNIQUE(date, model, mode)`
+
+**일일 한도 체크 쿼리** (API 호출 전):
+```sql
+SELECT
+  COALESCE(SUM(input_tokens), 0) AS used_input,
+  COALESCE(SUM(output_tokens), 0) AS used_output
+FROM daily_token_usage
+WHERE date = date('now', 'localtime')
+  AND mode = 'api';
+```
+
+### `composite_scores` 칼럼 추가
+
+```sql
+ALTER TABLE composite_scores ADD COLUMN sentiment_source TEXT
+  CHECK(sentiment_source IN ('api','manual_prompt','fallback','cache')) DEFAULT 'api';
+```
+
+---
+
+## Phase 7 신규 테이블·뷰 — 종목 스크리너
+
+### `universe_members`
+
+지수 멤버십 (날짜별 이력 보존 → 백테스트 정확성).
+
+| 칼럼 | 타입 | 설명 |
+|---|---|---|
+| universe_code | TEXT | KOSPI_200, KOSDAQ_150, SP500, NASDAQ_100, DOW30, ALL_KR |
+| ticker_id | INTEGER | FK → tickers.id |
+| as_of_date | TEXT | 멤버십 기준일 YYYY-MM-DD |
+| weight | REAL | 지수 내 비중 (있는 경우, 0~1) |
+| created_at | TEXT | DEFAULT (datetime('now')) |
+
+**제약**: `PRIMARY KEY (universe_code, ticker_id, as_of_date)`
+
+**인덱스**:
+```sql
+CREATE INDEX idx_universe_code_date ON universe_members(universe_code, as_of_date DESC);
+CREATE INDEX idx_universe_ticker ON universe_members(ticker_id);
+```
+
+### `watchlists`
+
+워치리스트 그룹 (env의 단일 리스트를 확장).
+
+| 칼럼 | 타입 | 설명 |
+|---|---|---|
+| id | INTEGER | PK AUTOINCREMENT |
+| ticker_id | INTEGER | FK → tickers.id |
+| group_name | TEXT | 'core' / 'screening' / 'core_kr' / 본인 정의 |
+| added_at | TEXT | DEFAULT (datetime('now')) |
+| added_by | TEXT | 'env' / 'manual' / 'screener:<preset>' |
+| notes | TEXT | NULL |
+
+**제약**: `UNIQUE(ticker_id, group_name)`
+
+### `screener_runs`
+
+스크리너 실행 이력 (감사 + 재실행).
+
+| 칼럼 | 타입 | 설명 |
+|---|---|---|
+| id | INTEGER | PK AUTOINCREMENT |
+| run_at | TEXT | DEFAULT (datetime('now')) |
+| preset_name | TEXT | NULL (preset 사용 시) |
+| sql_text | TEXT | 실행된 최종 SQL |
+| result_count | INTEGER | 결과 행 수 |
+| result_tickers | TEXT | JSON array (ticker_id들) |
+| elapsed_ms | INTEGER | 실행 시간 |
+| is_backtest | INTEGER | 0 / 1 |
+| backtest_period | TEXT | NULL or "2025-01-01_2026-05-22" |
+
+### `tickers` 칼럼 추가
+
+```sql
+ALTER TABLE tickers ADD COLUMN delisted_at TEXT;  -- ISO date, NULL이면 활성
+```
+
+---
+
+## Phase 7 뷰 (View) DDL
+
+> 모든 뷰는 SQL 직접 정의. SQLite는 materialized view 미지원이므로 실시간 계산.
+> 성능 이슈 시 → 일일 batch 끝에 별도 `cache_*` 테이블로 덤프.
+
+### `v_latest_scores`
+
+```sql
+CREATE VIEW v_latest_scores AS
+WITH latest_dates AS (
+  SELECT ticker_id, MAX(date) AS latest_date
+  FROM composite_scores
+  GROUP BY ticker_id
+),
+latest_composite AS (
+  SELECT cs.*
+  FROM composite_scores cs
+  JOIN latest_dates ld
+    ON cs.ticker_id = ld.ticker_id AND cs.date = ld.latest_date
+),
+latest_factors AS (
+  SELECT
+    fs.ticker_id,
+    MAX(CASE WHEN factor_name='valuation' THEN score END) AS valuation_score,
+    MAX(CASE WHEN factor_name='fundamentals' THEN score END) AS fundamentals_score,
+    MAX(CASE WHEN factor_name='technical' THEN score END) AS technical_score,
+    MAX(CASE WHEN factor_name='macro' THEN score END) AS macro_score,
+    MAX(CASE WHEN factor_name='sentiment' THEN score END) AS sentiment_score,
+    -- raw_values JSON에서 핵심 지표 추출 (SQLite JSON1 확장)
+    MAX(CASE WHEN factor_name='valuation' THEN json_extract(raw_values, '$.per') END) AS per,
+    MAX(CASE WHEN factor_name='valuation' THEN json_extract(raw_values, '$.pbr') END) AS pbr,
+    MAX(CASE WHEN factor_name='valuation' THEN json_extract(raw_values, '$.peg') END) AS peg,
+    MAX(CASE WHEN factor_name='valuation' THEN json_extract(raw_values, '$.dividend_yield') END) AS dividend_yield,
+    MAX(CASE WHEN factor_name='fundamentals' THEN json_extract(raw_values, '$.roe') END) AS roe,
+    MAX(CASE WHEN factor_name='fundamentals' THEN json_extract(raw_values, '$.revenue_growth_yoy') END) AS revenue_growth_yoy,
+    MAX(CASE WHEN factor_name='fundamentals' THEN json_extract(raw_values, '$.operating_margin') END) AS operating_margin,
+    MAX(CASE WHEN factor_name='technical' THEN json_extract(raw_values, '$.rsi_14') END) AS rsi_14,
+    MAX(CASE WHEN factor_name='technical' THEN json_extract(raw_values, '$.ma200_distance') END) AS ma200_distance,
+    MAX(CASE WHEN factor_name='technical' THEN json_extract(raw_values, '$.volume_zscore') END) AS volume_zscore
+  FROM factor_scores fs
+  JOIN latest_dates ld
+    ON fs.ticker_id = ld.ticker_id AND fs.date = ld.latest_date
+  GROUP BY fs.ticker_id
+)
+SELECT
+  t.id AS ticker_id,
+  t.code, t.name, t.market, t.sector,
+  lc.price_at_score AS price,
+  lc.total_score AS composite_score,
+  lc.verdict,
+  lf.valuation_score, lf.fundamentals_score, lf.technical_score,
+  lf.macro_score, lf.sentiment_score,
+  lf.per, lf.pbr, lf.peg, lf.dividend_yield,
+  lf.roe, lf.revenue_growth_yoy, lf.operating_margin,
+  lf.rsi_14, lf.ma200_distance, lf.volume_zscore,
+  lc.date AS as_of_date,
+  (SELECT GROUP_CONCAT(universe_code) FROM universe_members um
+    WHERE um.ticker_id = t.id AND um.as_of_date = lc.date) AS universes
+FROM tickers t
+JOIN latest_composite lc ON t.id = lc.ticker_id
+LEFT JOIN latest_factors lf ON t.id = lf.ticker_id
+WHERE t.delisted_at IS NULL OR t.delisted_at > lc.date;
+```
+
+### `v_score_history`
+
+```sql
+CREATE VIEW v_score_history AS
+SELECT
+  t.id AS ticker_id, t.code, t.name, t.market,
+  cs.date, cs.total_score AS composite_score, cs.verdict,
+  MAX(CASE WHEN fs.factor_name='valuation' THEN fs.score END) AS valuation_score,
+  MAX(CASE WHEN fs.factor_name='fundamentals' THEN fs.score END) AS fundamentals_score,
+  MAX(CASE WHEN fs.factor_name='technical' THEN fs.score END) AS technical_score,
+  MAX(CASE WHEN fs.factor_name='macro' THEN fs.score END) AS macro_score,
+  MAX(CASE WHEN fs.factor_name='sentiment' THEN fs.score END) AS sentiment_score
+FROM tickers t
+JOIN composite_scores cs ON t.id = cs.ticker_id
+LEFT JOIN factor_scores fs ON t.id = fs.ticker_id AND cs.date = fs.date
+GROUP BY t.id, cs.date;
+```
+
+### `v_universe`
+
+```sql
+CREATE VIEW v_universe AS
+SELECT
+  um.universe_code, um.ticker_id, t.code, t.name, t.market,
+  um.as_of_date, um.weight
+FROM universe_members um
+JOIN tickers t ON um.ticker_id = t.id;
+```
+
+### `v_at_date(:date)` — 동적 처리
+
+SQLite는 인자 받는 뷰가 없으므로 Python 측에서 CTE로 동적 생성:
+
+```python
+def query_at_date(sql_template: str, target_date: str) -> str:
+    """v_at_date(:date)를 실제 CTE로 치환."""
+    cte = f"""
+    WITH v_at_date AS (
+      SELECT ... (v_latest_scores와 동일하되 latest_dates를 :date 기준으로)
+    )
+    """
+    return cte + sql_template.replace("v_at_date(:date)", "v_at_date")
+```
+
+---
+
+## 통합 마이그레이션 SQL (Phase 4 + 7)
+
+```sql
+-- 002_hybrid_sentiment.sql
+
+ALTER TABLE news_summaries ADD COLUMN source TEXT
+  NOT NULL DEFAULT 'api'
+  CHECK(source IN ('api','manual_prompt','fallback'));
+
+ALTER TABLE news_summaries ADD COLUMN batch_id TEXT;
+
+ALTER TABLE composite_scores ADD COLUMN sentiment_source TEXT
+  CHECK(sentiment_source IN ('api','manual_prompt','fallback','cache')) DEFAULT 'api';
+
+CREATE TABLE IF NOT EXISTS daily_token_usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  date TEXT NOT NULL,
+  model TEXT NOT NULL,
+  mode TEXT NOT NULL CHECK(mode IN ('api','manual_prompt')),
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  call_count INTEGER NOT NULL DEFAULT 0,
+  estimated_cost_usd REAL NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(date, model, mode)
+);
+
+INSERT INTO schema_version (version) VALUES (2);
+```
+
+```sql
+-- 003_screener.sql
+
+ALTER TABLE tickers ADD COLUMN delisted_at TEXT;
+
+CREATE TABLE IF NOT EXISTS universe_members (
+  universe_code TEXT NOT NULL,
+  ticker_id INTEGER NOT NULL REFERENCES tickers(id) ON DELETE CASCADE,
+  as_of_date TEXT NOT NULL,
+  weight REAL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (universe_code, ticker_id, as_of_date)
+);
+CREATE INDEX IF NOT EXISTS idx_universe_code_date ON universe_members(universe_code, as_of_date DESC);
+CREATE INDEX IF NOT EXISTS idx_universe_ticker ON universe_members(ticker_id);
+
+CREATE TABLE IF NOT EXISTS watchlists (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticker_id INTEGER NOT NULL REFERENCES tickers(id) ON DELETE CASCADE,
+  group_name TEXT NOT NULL DEFAULT 'core',
+  added_at TEXT NOT NULL DEFAULT (datetime('now')),
+  added_by TEXT NOT NULL DEFAULT 'manual',
+  notes TEXT,
+  UNIQUE(ticker_id, group_name)
+);
+
+CREATE TABLE IF NOT EXISTS screener_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_at TEXT NOT NULL DEFAULT (datetime('now')),
+  preset_name TEXT,
+  sql_text TEXT NOT NULL,
+  result_count INTEGER NOT NULL,
+  result_tickers TEXT NOT NULL,
+  elapsed_ms INTEGER NOT NULL,
+  is_backtest INTEGER NOT NULL DEFAULT 0,
+  backtest_period TEXT
+);
+
+-- 뷰는 별도 파일 또는 views.py에서 생성
+
+INSERT INTO schema_version (version) VALUES (3);
 ```

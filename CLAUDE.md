@@ -13,9 +13,10 @@
 - **핵심 기능 (MVP)**:
   1. 한국·미국 종목 다요인 점수 계산 (Valuation·Fundamentals·Technical·Macro·Sentiment)
   2. 워치리스트 일일 배치 → SQLite 저장 → 히스토리 추적
-  3. 뉴스·공시 자동 요약 (Claude API)
+  3. **하이브리드 sentiment**: 워치리스트는 Anthropic API 자동, 스크리너·심층 분석은 Claude.ai 프롬프트 (Pro 구독 활용)
   4. 3종 알림 트리거 (점수 임계치 · 점수 급변 · 일일 리포트)
   5. Craft 일일 노트 자동 생성
+  6. **SQL 기반 종목 스크리너** (Phase 7) — KOSPI 200, KOSDAQ 150, S&P 500, NASDAQ 100 유니버스 + 백테스트
 
 ### ⚠️ 절대 원칙 (Claude Code는 이 원칙을 모든 코드·UI·문서에 반영)
 
@@ -127,10 +128,24 @@ stock-compass/
 │       │   ├── __init__.py
 │       │   ├── craft.py               # Craft Markdown 노트
 │       │   ├── terminal.py            # rich 콘솔
-│       │   └── notify.py              # macOS osascript 알림
-│       ├── llm/                       # Claude API 래퍼
+│       │   ├── notify.py              # macOS osascript 알림
+│       │   ├── prompt_generator.py    # 하이브리드 모드 Prompt MD 생성
+│       │   └── exporter.py            # CSV / JSON
+│       ├── screener/                  # Phase 7 — SQL 스크리너
 │       │   ├── __init__.py
-│       │   └── summarizer.py          # 뉴스·공시 요약
+│       │   ├── engine.py              # SQL 실행 (RO 모드)
+│       │   ├── views.py               # 뷰 DDL
+│       │   ├── universes/             # 유니버스 자동 갱신
+│       │   │   ├── __init__.py
+│       │   │   ├── kr.py              # KOSPI 200, KOSDAQ 150, ALL_KR
+│       │   │   └── us.py              # S&P 500, NASDAQ 100, DOW 30
+│       │   ├── backtest.py            # 백테스트 엔진
+│       │   ├── presets.py             # 프리셋 로더
+│       │   └── repl.py                # 인터랙티브 REPL (선택)
+│       ├── llm/                       # Claude API + Prompt 모드
+│       │   ├── __init__.py
+│       │   ├── summarizer.py          # API 호출 (워치리스트용)
+│       │   └── prompt_importer.py     # Claude.ai 응답 import (하이브리드)
 │       ├── db/                        # SQLite 추상화
 │       │   ├── __init__.py
 │       │   ├── schema.py              # 테이블 정의
@@ -181,6 +196,11 @@ stock-compass/
 | `DEFAULT_MARKET` | ✅ | KR 또는 US (기본 시장) | 본인 설정 |
 | `WATCHLIST_KR` | ✅ | 한국 종목 코드 콤마 구분 (예: `005930,035720`) | 본인 |
 | `WATCHLIST_US` | ✅ | 미국 티커 콤마 구분 (예: `AAPL,MSFT,NVDA`) | 본인 |
+| `SENTIMENT_MODE` | ✅ | `api` / `prompt` / `hybrid` (기본 `hybrid`) | 본인 |
+| `HYBRID_API_FOR` | ⛔ 선택 | API 사용 대상 (`watchlist`) | 본인 |
+| `HYBRID_PROMPT_FOR` | ⛔ 선택 | Prompt 모드 대상 (`screener,manual`) | 본인 |
+| `PROMPT_DIR` | ⛔ 선택 | Prompt 파일 위치 (기본 `data/prompts`) | 본인 |
+| `SCREENER_DEFAULT_LIMIT` | ⛔ 선택 | 스크리너 기본 결과 행 수 (기본 50) | 본인 |
 
 ## 6) 데이터베이스 (SQLite)
 
@@ -369,6 +389,60 @@ uv run pytest --cov=src       # 커버리지
 - 새 알림 종류 추가 시 → `alerts/[name].py` + DB `alerts.trigger_type` enum 확장
 - 모든 외부 API 호출은 retry 데코레이터 적용 (`utils/retry.py`)
 - 새 코드 작성 후 반드시 실행: `uv run ruff check . && uv run mypy src/`
+- **스크리너 코드 작성 시**: SQLite 연결은 반드시 `mode=ro` (DDL/DML 차단)
+- **새 스크리너 뷰 추가 시**: 항상 `as_of` 파라미터 지원 (point-in-time 정확성)
+- **하이브리드 sentiment 작업 시**: source 칼럼(api/manual/fallback) 정확히 표기
+
+## 15) 하이브리드 Sentiment 모드 (기본 동작)
+
+상세: `docs/HYBRID_SENTIMENT.md`
+
+### 동작 분기
+
+| 입력 | 동작 |
+|---|---|
+| `stock-compass batch` (워치리스트) | API 자동 호출 → DB 저장 |
+| `stock-compass screen ... --prompt-deepdive` | Prompt MD 파일 생성 (API X) |
+| `stock-compass sentiment prompt --tickers X,Y,Z` | Prompt MD 파일 생성 |
+| `stock-compass sentiment import <file>` | Claude.ai 응답 파싱 → DB 저장 |
+
+### DB 추적
+
+- `news_summaries.source` 칼럼: `'api'` / `'manual_prompt'` / `'fallback'`
+- `composite_scores.sentiment_source`: 어느 경로로 갱신됐는지
+
+### 비용 안전장치
+
+- `ANTHROPIC_DAILY_INPUT_LIMIT` 초과 시 자동으로 prompt 모드 fallback (워치리스트도)
+- 일 사용량 로그: `logs/anthropic-usage-YYYYMM.log`
+
+## 16) 종목 스크리너 (Phase 7)
+
+상세: `docs/SCREENER_SPEC.md`
+
+### 핵심 원칙
+
+- **DSL**: SQL (SQLite 직접 쿼리)
+- **인터페이스**: 사전 정의 뷰 (`v_latest_scores`, `v_score_history`, `v_universe`, `v_at_date(:date)`)
+- **읽기 전용**: 연결은 `mode=ro` URI — DDL/DML 자동 차단
+- **유니버스**: KOSPI 200, KOSDAQ 150, ALL_KR, S&P 500, NASDAQ 100, DOW 30
+- **백테스트**: `v_at_date(:date)` 활용 + survivorship/look-ahead 처리
+
+### Claude Code 작업 시 체크
+
+- 새 뷰 추가 → `screener/views.py`에 SQL + 마이그레이션 + `docs/SCREENER_SPEC.md` 칼럼 치트시트 업데이트
+- 새 유니버스 추가 → `screener/universes/[market].py` + 일일 갱신 잡 추가
+- 새 프리셋 → `screeners/presets/*.sql`에 저장 + 면책 주석 포함
+- 백테스트 결과에는 반드시 한계 명시 (거래비용·세금·survivorship 등)
+
+### 출력 옵션 통합
+
+스크리너 결과는 5개 채널로 동일하게 출력 가능:
+- 터미널 (rich.table)
+- CSV / JSON
+- Craft 노트
+- 워치리스트 자동 추가 (`--add-to-watchlist`)
+- 심층 분석 Prompt 생성 (`--prompt-deepdive`)
 
 ---
 

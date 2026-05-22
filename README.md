@@ -23,9 +23,11 @@
 | 다요인 점수화 | Valuation 30% + Fundamentals 25% + Technical 20% + Macro 15% + Sentiment 10% |
 | KR/US 자동 전환 | 6자리 숫자 → KR, 알파벳 → US (또는 `--market` 명시) |
 | 일일 배치 | launchd 자동 실행 → SQLite 저장 → 히스토리 추적 |
+| **하이브리드 sentiment** | 워치리스트 API 자동 + 스크리너·심층 분석 Claude.ai 프롬프트 (Pro 구독 활용) |
 | Craft 노트 자동 생성 | 매일 종목별 카드 + 본인 매매 일지 슬롯 |
 | 3종 알림 | 임계치 진입 · 점수 급변 · 일일 리포트 (macOS Notification) |
 | 매매 편향 분석 | 본인 매매 시점 점수 분포 → 충동 매매 탐지 |
+| **SQL 종목 스크리너** | KOSPI 200, KOSDAQ 150, S&P 500, NASDAQ 100 유니버스 + 6개 프리셋 + 백테스트 |
 
 ---
 
@@ -90,6 +92,17 @@ uv run stock-compass batch --market kr
 
 # 30일 히스토리
 uv run stock-compass history 005930 --days 30
+
+# 종목 스크리너 (Phase 7)
+uv run stock-compass screen --preset value_growth_kr
+uv run stock-compass screen --preset momentum_us --add-to-watchlist --group screening
+uv run stock-compass screen --list-presets
+
+# 하이브리드 sentiment — 스크리너 결과 심층 분석 프롬프트 생성
+uv run stock-compass screen --preset deep_value_kr --prompt-deepdive
+# → data/prompts/*.md 생성 → Claude.ai 복붙 → 응답 import
+
+uv run stock-compass sentiment import --file ~/Downloads/claude_response.txt --batch-id <id>
 
 # 매매 기록 (편향 분석용)
 uv run stock-compass trade add AAPL buy --price 215.40 --qty 5 --reason "분할 1차"
