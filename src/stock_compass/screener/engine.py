@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from stock_compass.config import settings
+from stock_compass.markets.base import Market
 from stock_compass.utils.dates import today_kst
 from stock_compass.utils.logging import get_logger
 
@@ -85,9 +86,23 @@ class ScreenerEngine:
         params: Mapping[str, Any] | None = None,
         limit: int | None = None,
         preset_name: str | None = None,
+        budget: float | None = None,
+        budget_market: Market | None = None,
     ) -> ScreenerResult:
+        """budget 지정 시 원본 SQL을 CTE로 감싸 `WHERE price <= :budget` 추가.
+
+        budget_market 지정 시 시장 통화 분리 (KRW/USD 환산 회피).
+        """
         self._validate(sql)
         rewritten = self._expand_v_at_date(sql)
+
+        merged_params: dict[str, Any] = dict(params or {})
+        if budget is not None:
+            rewritten = self._wrap_with_budget(rewritten, budget, budget_market)
+            merged_params["__budget"] = budget
+            if budget_market is not None:
+                merged_params["__bm"] = budget_market
+
         target_limit = self._target_limit(limit)
         final_sql = self._enforce_limit(rewritten, target_limit)
 
@@ -95,7 +110,7 @@ class ScreenerEngine:
         with self._ro_connection() as conn:
             self._install_timeout(conn, start)
             try:
-                cur = conn.execute(final_sql, dict(params or {}))
+                cur = conn.execute(final_sql, merged_params)
             except sqlite3.OperationalError as e:
                 raise ScreenerError(f"SQL 실행 오류: {e}") from e
             columns = [d[0] for d in (cur.description or [])]
@@ -167,6 +182,52 @@ class ScreenerEngine:
             # 기존 LIMIT을 max로 클램프
             return clean[: m.start()].rstrip() + f"\nLIMIT {self.max_limit}"
         return clean
+
+    def _wrap_with_budget(
+        self, sql: str, budget: float, market: Market | None
+    ) -> str:
+        """원본 SQL을 CTE로 감싸 budget 필터 적용.
+
+        price 컬럼 자동 탐지: `price`, `price_krw`, `price_usd` 중 첫 매치 사용.
+        market 컬럼이 base에 없으면 `--budget-market` 무시 (안전 fallback).
+        """
+        _ = budget  # SQL 바인딩으로만 전달
+        clean = sql.rstrip().rstrip(";").rstrip()
+        m = _LIMIT_TAIL.search(clean)
+        if m is not None:
+            clean = clean[: m.start()].rstrip()
+
+        base_columns = self._probe_columns(clean)
+        price_col = next(
+            (c for c in ("price", "price_krw", "price_usd") if c in base_columns),
+            None,
+        )
+        if price_col is None:
+            raise ScreenerError(
+                "이 SQL은 price 컬럼을 노출하지 않습니다 — "
+                "budget 사용 불가 (SELECT에 price/price_krw/price_usd 중 하나 추가)"
+            )
+
+        has_market = "market" in base_columns
+        market_clause = (
+            " AND market = :__bm" if market is not None and has_market else ""
+        )
+        return (
+            f"WITH __base AS (\n{clean}\n)\n"
+            f"SELECT * FROM __base "
+            f"WHERE {price_col} IS NOT NULL AND {price_col} <= :__budget"
+            f"{market_clause}"
+        )
+
+    def _probe_columns(self, base_sql: str) -> set[str]:
+        """base SQL을 LIMIT 0으로 한 번 실행해 컬럼 이름 추출."""
+        probe = f"WITH __probe AS (\n{base_sql}\n) SELECT * FROM __probe LIMIT 0"
+        try:
+            with self._ro_connection() as conn:
+                cur = conn.execute(probe)
+                return {d[0] for d in (cur.description or [])}
+        except sqlite3.OperationalError:
+            return set()
 
     # ─── 연결·타임아웃 ───
 

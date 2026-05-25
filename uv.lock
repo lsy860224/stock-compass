@@ -2209,8 +2209,10 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
+    { name = "beautifulsoup4" },
     { name = "fredapi" },
     { name = "httpx" },
+    { name = "lxml" },
     { name = "numpy" },
     { name = "opendartreader", version = "0.2.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "opendartreader", version = "0.3.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
@@ -2250,8 +2252,10 @@ dev = [
 requires-dist = [
     { name = "altair", marker = "extra == 'dashboard'", specifier = ">=5.4" },
     { name = "anthropic", specifier = ">=0.40.0" },
+    { name = "beautifulsoup4", specifier = ">=4.12" },
     { name = "fredapi", specifier = ">=0.5.2" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "lxml", specifier = ">=5.2" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "opendartreader", specifier = ">=0.2.2" },
     { name = "pandas", specifier = ">=2.2" },

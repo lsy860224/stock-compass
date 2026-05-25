@@ -17,10 +17,8 @@ def make_score(
 ) -> CompositeScore:
     factors = [
         FactorScore(
-            name=n,  # type: ignore[arg-type]
-            score=total,
-            weight=DEFAULT_WEIGHTS[n],  # type: ignore[index]
-        )
+            name=n,            score=total,
+            weight=DEFAULT_WEIGHTS[n],        )
         for n in DEFAULT_WEIGHTS
     ]
     return CompositeScore(

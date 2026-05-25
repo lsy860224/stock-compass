@@ -66,6 +66,7 @@ class Settings(BaseSettings):
     craft_api_token: SecretStr | None = None
     craft_daily_folder_id: str | None = None
     craft_tickers_folder_id: str | None = None
+    craft_api_base_url: str = "https://www.craft.do/api/v1"
 
     # ─── Sentiment 모드 (하이브리드 기본) ───
     sentiment_mode: SentimentMode = "hybrid"

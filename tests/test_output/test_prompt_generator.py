@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -64,7 +65,7 @@ def generator(tmp_path: Path) -> PromptGenerator:
 
 
 @pytest.fixture(autouse=True)
-def _patch_adapter() -> None:
+def _patch_adapter() -> Iterator[None]:
     """get_adapter가 _FakeAdapter를 돌려주도록 패치 — 실제 yfinance 호출 차단."""
     with patch(
         "stock_compass.output.prompt_generator.get_adapter",

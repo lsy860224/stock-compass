@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, get_args
+from typing import TYPE_CHECKING, Annotated, Any, get_args
 
 import typer
 from rich.console import Console
@@ -290,14 +290,31 @@ def report(
     market: Annotated[
         str | None, typer.Option("--market", "-m", help="kr / us — 미지정 시 전체")
     ] = None,
+    publish: Annotated[
+        bool,
+        typer.Option(
+            "--publish", help="파일 생성 후 Craft Pro API로 즉시 발행 (CRAFT_API_TOKEN 필요)"
+        ),
+    ] = False,
+    no_file: Annotated[
+        bool,
+        typer.Option(
+            "--no-file", help="파일 생성 생략 (--publish와 함께 사용해 API만 발행)"
+        ),
+    ] = False,
 ) -> None:
-    """Craft 일일 노트 Markdown 생성 (`data/craft_export/YYYY-MM-DD.md`)."""
+    """Craft 일일 노트 — 파일 생성 + 옵션으로 Craft Pro API 자동 발행."""
     import subprocess
     from datetime import date as date_cls
 
     from stock_compass.config import settings
     from stock_compass.db import get_db_connection, get_scores_on_date
-    from stock_compass.output.craft import CraftExporter
+    from stock_compass.output.craft import (
+        CraftAPIError,
+        CraftAuthError,
+        CraftExporter,
+        CraftPublisher,
+    )
     from stock_compass.utils.dates import today_kst
     from stock_compass.utils.logging import setup_logging
 
@@ -323,16 +340,32 @@ def report(
         raise typer.Exit(code=1)
 
     exporter = CraftExporter()
-    path = exporter.export(scores, on_date)
-    console.print(
-        f"[green]✓[/green] 노트 생성: [cyan]{path}[/cyan]  ({len(scores)}종목)"
-    )
+    content = exporter.render_daily_note(scores, on_date)
 
-    if open_file:
+    if not no_file:
+        path = exporter.export_to_file(content, on_date)
+        console.print(
+            f"[green]✓[/green] 노트 파일: [cyan]{path}[/cyan]  ({len(scores)}종목)"
+        )
+        if open_file:
+            try:
+                subprocess.run(["open", "-R", str(path)], check=False)
+            except FileNotFoundError:
+                console.print("[yellow]`open` 명령 미지원 (macOS 외부 환경).[/yellow]")
+
+    if publish:
         try:
-            subprocess.run(["open", "-R", str(path)], check=False)
-        except FileNotFoundError:
-            console.print("[yellow]`open` 명령 미지원 (macOS 외부 환경).[/yellow]")
+            publisher = CraftPublisher()
+            result = publisher.publish_daily_note(content, on_date)
+            action = "갱신" if result.is_update else "발행"
+            console.print(
+                f"[green]✓ Craft {action}:[/green] [cyan]{result.url}[/cyan]"
+                f" (note_id={result.note_id})"
+            )
+        except CraftAuthError as e:
+            console.print(f"[yellow]Craft 인증 실패: {e}[/yellow]")
+        except CraftAPIError as e:
+            console.print(f"[red]Craft API 오류: {e}[/red]")
 
 
 @sentiment_app.command("prompt")
@@ -706,6 +739,20 @@ def screen(
     limit: Annotated[
         int | None, typer.Option("--limit", "-l", help="결과 행 수 (기본 50, 최대 5000)")
     ] = None,
+    budget: Annotated[
+        float | None,
+        typer.Option(
+            "--budget",
+            help="1주 가격 ≤ 예산 (시장 통화 — KRW 또는 USD). preset에 price 컬럼 필요",
+        ),
+    ] = None,
+    budget_market: Annotated[
+        str | None,
+        typer.Option(
+            "--budget-market",
+            help="budget을 적용할 시장 (kr/us). 미지정 시 모든 시장",
+        ),
+    ] = None,
     output_format: Annotated[
         str, typer.Option("--format", help="table / csv / json")
     ] = "table",
@@ -719,7 +766,7 @@ def screen(
         bool, typer.Option("--list-fields", help="v_latest_scores 칼럼 치트시트")
     ] = False,
 ) -> None:
-    """SQL 스크리너 — RO 모드 + LIMIT 강제 + 안전 검증."""
+    """SQL 스크리너 — RO 모드 + LIMIT 강제 + 안전 검증 + 예산 필터."""
     from stock_compass.config import settings
     from stock_compass.output.screener import (
         export_to_file,
@@ -769,9 +816,16 @@ def screen(
         )
         raise typer.Exit(code=2)
 
+    bm_norm = _parse_market(budget_market)
     try:
         engine = ScreenerEngine()
-        result = engine.run_sql(sql_text, limit=limit, preset_name=preset_name)
+        result = engine.run_sql(
+            sql_text,
+            limit=limit,
+            preset_name=preset_name,
+            budget=budget,
+            budget_market=bm_norm,
+        )
     except ScreenerError as e:
         console.print(f"[red]스크리너 거부: {e}[/red]")
         raise typer.Exit(code=1) from e
@@ -798,51 +852,251 @@ def screen(
         raise typer.Exit(code=2)
 
 
+@app.command()
+def discover(
+    preset: Annotated[str, typer.Option("--preset", help="screeners/presets/<name>.sql")],
+    budget: Annotated[
+        float | None,
+        typer.Option("--budget", help="1주 가격 ≤ 예산 (시장 통화)"),
+    ] = None,
+    market: Annotated[
+        str | None, typer.Option("--market", "-m", help="kr / us (budget 시장 분리)")
+    ] = None,
+    refresh_universe: Annotated[
+        str | None,
+        typer.Option(
+            "--refresh",
+            help="discover 전 universe 갱신 (KOSPI_200/KOSDAQ_150/SP500/...)",
+        ),
+    ] = None,
+    score_limit: Annotated[
+        int,
+        typer.Option(
+            "--score-limit", help="screener 결과 중 상위 N개만 점수화 (기본 20)"
+        ),
+    ] = 20,
+    no_persist: Annotated[
+        bool, typer.Option("--no-persist", help="batch 결과 DB 저장 생략")
+    ] = False,
+    publish_craft: Annotated[
+        bool,
+        typer.Option("--publish-craft", help="결과를 Craft API로 즉시 발행 (Phase D)"),
+    ] = False,
+) -> None:
+    """동적 발굴 파이프라인 — universe → screener → batch → 노트.
+
+    워치리스트(.env) 대신 매일 새 후보를 발굴해 점수화. 예산 필터로 1주 가격
+    제한 가능. `--publish-craft`로 Craft Pro API 자동 발행.
+    """
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        TaskProgressColumn,
+        TextColumn,
+        TimeElapsedColumn,
+    )
+
+    from stock_compass.config import settings
+    from stock_compass.db import get_db_connection
+    from stock_compass.output.terminal import render_score_ranking
+    from stock_compass.scoring import ScoringEngine
+    from stock_compass.screener import (
+        PresetNotFoundError,
+        ScreenerEngine,
+        ScreenerError,
+        load_preset,
+    )
+    from stock_compass.screener.universes import (
+        SUPPORTED_UNIVERSES,
+        UniverseFetchError,
+    )
+    from stock_compass.screener.universes import refresh as universe_refresh_fn
+    from stock_compass.utils.logging import setup_logging
+
+    setup_logging(settings.log_dir)
+    market_norm = _parse_market(market)
+
+    # 1) universe 갱신 (선택)
+    if refresh_universe:
+        target = refresh_universe.upper()
+        if target not in SUPPORTED_UNIVERSES:
+            console.print(
+                f"[red]지원하지 않는 universe: {target}[/red]\n"
+                f"[dim]지원: {', '.join(SUPPORTED_UNIVERSES)}[/dim]"
+            )
+            raise typer.Exit(code=2)
+        try:
+            with get_db_connection() as conn:
+                r = universe_refresh_fn(conn, target)
+            console.print(
+                f"[cyan]universe[/cyan] {r.universe_code}: +{r.members} 신규"
+            )
+        except UniverseFetchError as e:
+            console.print(f"[yellow]{e} (기존 멤버 사용)[/yellow]")
+
+    # 2) screener 실행
+    try:
+        sql_text = load_preset(preset)
+    except PresetNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=2) from e
+
+    try:
+        engine = ScreenerEngine()
+        result = engine.run_sql(
+            sql_text,
+            limit=score_limit,
+            preset_name=f"discover:{preset}",
+            budget=budget,
+            budget_market=market_norm,
+        )
+    except ScreenerError as e:
+        console.print(f"[red]스크리너 거부: {e}[/red]")
+        raise typer.Exit(code=1) from e
+
+    if not result.rows:
+        console.print(
+            f"[yellow]preset={preset} 결과 0건 — 조건 완화 또는 batch 사전 실행 필요.[/yellow]"
+        )
+        return
+
+    # 3) screener row → (ticker, market) 추출 → batch
+    targets = _screener_rows_to_targets(result.rows, default_market=market_norm)
+    if not targets:
+        console.print(
+            "[red]screener 결과에서 ticker/market 컬럼을 찾을 수 없음.[/red]\n"
+            "[dim]preset SQL이 `code` (또는 `ticker`) + `market` 컬럼을 노출해야 함.[/dim]"
+        )
+        raise typer.Exit(code=1)
+
+    console.print(
+        f"[cyan]후보 {len(targets)}종목[/cyan] 점수화 시작 "
+        f"(KR={sum(1 for _, m in targets if m == 'KR')}, "
+        f"US={sum(1 for _, m in targets if m == 'US')})"
+    )
+
+    scoring_engine = ScoringEngine()
+    market_for: dict[str, Market] = dict(targets)
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("•"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        scores = _run_mixed(
+            scoring_engine,
+            [t for t, _ in targets],
+            market_for,
+            progress,
+            persist=not no_persist,
+        )
+
+    render_score_ranking(scores, console=console)
+
+    # 4) Craft 발행 (선택)
+    if publish_craft:
+        _publish_discover_to_craft(scores, preset_name=preset)
+
+
+def _screener_rows_to_targets(
+    rows: list[dict[str, Any]],
+    *,
+    default_market: Market | None,
+) -> list[tuple[str, Market]]:
+    """screener row → (ticker, market) 튜플. code/ticker + market 컬럼 자동 탐지."""
+    out: list[tuple[str, Market]] = []
+    for row in rows:
+        ticker = row.get("code") or row.get("ticker")
+        if not ticker:
+            continue
+        row_market = row.get("market") or default_market
+        if not row_market or row_market not in ("KR", "US"):
+            continue
+        out.append((str(ticker), row_market))
+    return out
+
+
+def _publish_discover_to_craft(
+    scores: list[CompositeScore], *, preset_name: str
+) -> None:
+    """Phase D — Craft API 발행. 토큰 없으면 친절한 안내."""
+    from stock_compass.config import settings
+
+    if settings.craft_api_token is None:
+        console.print(
+            "[yellow]--publish-craft 무시: CRAFT_API_TOKEN 미설정 "
+            "(.env.local에 추가 후 재시도)[/yellow]"
+        )
+        return
+
+    try:
+        from stock_compass.output.craft import CraftPublisher
+    except ImportError:
+        console.print(
+            "[yellow]CraftPublisher 미구현 (Phase D 후속) — 파일 fallback 사용[/yellow]"
+        )
+        return
+
+    publisher = CraftPublisher()
+    from stock_compass.output.craft import CraftExporter
+    from stock_compass.utils.dates import today_kst
+
+    on_date = today_kst()
+    content = CraftExporter().render_daily_note(scores, on_date)
+    try:
+        result = publisher.publish_daily_note(
+            content, on_date, note_kind=f"discover:{preset_name}"
+        )
+        console.print(f"[green]✓ Craft 발행:[/green] {result.url}")
+    except Exception as e:
+        console.print(f"[red]Craft 발행 실패: {e}[/red]")
+
+
 @universe_app.command("refresh")
 def universe_refresh(
     code: Annotated[
         str | None,
         typer.Option(
             "--code",
-            help="갱신할 universe (현재 지원: WATCHLIST; KOSPI_200/SP500 등은 TODO)",
+            help="갱신할 universe (WATCHLIST/KOSPI_200/KOSDAQ_150/SP500/NASDAQ_100/DOW30)",
         ),
     ] = None,
 ) -> None:
-    """유니버스 멤버 갱신 — 현재는 WATCHLIST(.env)만 즉시 가동."""
+    """유니버스 멤버 갱신 — pykrx(KR) + Wikipedia(US). 실패 시 7일 fallback 캐시."""
     from stock_compass.config import settings
     from stock_compass.db import get_db_connection
     from stock_compass.screener.universes import (
+        SUPPORTED_UNIVERSES,
         UNIVERSE_WATCHLIST,
-        refresh_kospi_200,
-        refresh_sp500,
-        refresh_watchlist,
+        UniverseFetchError,
+        refresh,
     )
     from stock_compass.utils.logging import setup_logging
 
     setup_logging(settings.log_dir)
 
     target = (code or UNIVERSE_WATCHLIST).upper()
-    with get_db_connection() as conn:
-        if target == UNIVERSE_WATCHLIST:
-            r = refresh_watchlist(conn)
-        elif target == "KOSPI_200":
-            try:
-                r = refresh_kospi_200(conn)
-            except NotImplementedError as e:
-                console.print(f"[yellow]{e}[/yellow]")
-                raise typer.Exit(code=2) from e
-        elif target == "SP500":
-            try:
-                r = refresh_sp500(conn)
-            except NotImplementedError as e:
-                console.print(f"[yellow]{e}[/yellow]")
-                raise typer.Exit(code=2) from e
-        else:
-            console.print(f"[red]미지원 universe: {target}[/red]")
-            raise typer.Exit(code=2)
+    if target not in SUPPORTED_UNIVERSES:
+        console.print(
+            f"[red]지원하지 않는 universe: {target}[/red]\n"
+            f"[dim]지원: {', '.join(SUPPORTED_UNIVERSES)}[/dim]"
+        )
+        raise typer.Exit(code=2)
+
+    try:
+        with get_db_connection() as conn:
+            r = refresh(conn, target)
+    except UniverseFetchError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=2) from e
 
     console.print(
-        f"[green]✓[/green] {r.universe_code}: {r.members}종목 등록 "
+        f"[green]✓[/green] {r.universe_code}: {r.members}종목 신규 등록 "
         f"(as_of={r.as_of_date})"
     )
 

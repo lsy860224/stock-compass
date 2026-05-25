@@ -296,3 +296,19 @@ JOIN tickers t ON um.ticker_id = t.id;
 """
 
 
+MIGRATION_004_CRAFT_PUBLICATIONS = """
+CREATE TABLE IF NOT EXISTS craft_publications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  note_kind TEXT NOT NULL,
+  on_date TEXT NOT NULL,
+  note_id TEXT NOT NULL,
+  folder_id TEXT NOT NULL,
+  url TEXT,
+  published_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(note_kind, on_date)
+);
+CREATE INDEX IF NOT EXISTS idx_craft_publications_kind_date
+  ON craft_publications(note_kind, on_date DESC);
+"""
+
+

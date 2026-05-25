@@ -25,12 +25,16 @@ def conn(tmp_path: Path) -> sqlite3.Connection:
     c = sqlite3.connect(db, isolation_level=None)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA foreign_keys = ON")
-    for code, name in [("AAPL", "Apple"), ("005930", "삼성전자"), ("TSLA", "Tesla")]:
-        market = "KR" if code.isdigit() else "US"
+    seed: list[tuple[str, str, str]] = [
+        ("AAPL", "US", "Apple"),
+        ("005930", "KR", "삼성전자"),
+        ("TSLA", "US", "Tesla"),
+    ]
+    for code, market, name in seed:
         upsert_ticker(
             c,
             code=code,
-            market=market,
+            market=market,  # type: ignore[arg-type]
             name=name,
             sector=None,
             currency="KRW" if market == "KR" else "USD",

@@ -11,7 +11,7 @@ from stock_compass.scoring.engine import CompositeScore, ScoringEngine
 
 def _mk(ticker: str, score: float) -> CompositeScore:
     factors = [
-        FactorScore(name=name, score=score, weight=DEFAULT_WEIGHTS[name])  # type: ignore[arg-type]
+        FactorScore(name=name, score=score, weight=DEFAULT_WEIGHTS[name])
         for name in DEFAULT_WEIGHTS
     ]
     return CompositeScore(

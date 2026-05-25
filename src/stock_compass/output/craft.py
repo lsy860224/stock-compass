@@ -1,7 +1,7 @@
-"""Craft 일일 노트 (Markdown) 생성.
+"""Craft 일일 노트 (Markdown) 생성 + Craft Pro API 직접 발행.
 
-Phase 3: 파일 출력만 (`data/craft_export/YYYY-MM-DD.md`).
-Phase 5+에서 CRAFT_API_TOKEN으로 직접 발행 예정.
+CraftExporter: 파일 출력 (`data/craft_export/YYYY-MM-DD.md`)
+CraftPublisher: Craft Pro API로 노트 자동 발행 (Phase D)
 
 면책: 모든 노트 상단·하단에 자동 삽입 (CLAUDE.md 1).
 """
@@ -9,15 +9,24 @@ Phase 5+에서 CRAFT_API_TOKEN으로 직접 발행 예정.
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date as date_cls
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from stock_compass.config import settings
 from stock_compass.factors.base import FactorScore
+from stock_compass.output._craft_client import (
+    CraftAPIError,
+    CraftAuthError,
+    CraftClient,
+)
 from stock_compass.scoring.engine import DISCLAIMER, CompositeScore
+from stock_compass.utils.dates import now_utc, to_iso_utc
 from stock_compass.utils.logging import get_logger
 
 _logger = get_logger(__name__)
@@ -191,3 +200,160 @@ def _format_price(price: float | None, currency: str | None) -> str:
 def _clean_note(note: str) -> str:
     """마크다운 테이블 안전 — 파이프·줄바꿈 제거."""
     return note.replace("|", "/").replace("\n", " ").strip() or "—"
+
+
+# ──────────────────────── Craft Pro API publisher ────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class CraftPublishResult:
+    note_id: str
+    url: str
+    folder_id: str
+    published_at: datetime
+    is_update: bool
+
+
+class CraftPublisher:
+    """Craft Pro API 자동 발행 + DB 중복 추적 (craft_publications).
+
+    Token/folder_id는 settings에서 lazy 로드. 토큰 없으면 publish 호출 시
+    명확한 CraftAuthError raise (호출자가 파일 fallback 안내).
+    """
+
+    def __init__(
+        self,
+        *,
+        client: CraftClient | None = None,
+        default_folder_id: str | None = None,
+    ) -> None:
+        self._client = client
+        self.default_folder_id = default_folder_id or settings.craft_daily_folder_id
+
+    def publish_daily_note(
+        self,
+        content: str,
+        on_date: date_cls,
+        *,
+        folder_id: str | None = None,
+        note_kind: str = "daily",
+    ) -> CraftPublishResult:
+        """일일 노트 발행. 같은 (note_kind, on_date)가 이미 있으면 update."""
+        target_folder = folder_id or self.default_folder_id
+        if not target_folder:
+            raise CraftAuthError(
+                "CRAFT_DAILY_FOLDER_ID 미설정 — .env.local 확인"
+            )
+
+        client = self._get_client()
+        title = f"stock-compass · {on_date.isoformat()}"
+
+        from stock_compass.db import get_db_connection
+
+        with get_db_connection() as conn:
+            existing = _find_publication(conn, note_kind, on_date)
+            if existing:
+                response = client.update_note(
+                    existing["note_id"],
+                    title=title,
+                    content_markdown=content,
+                )
+                is_update = True
+            else:
+                response = client.post_note(
+                    target_folder,
+                    title=title,
+                    content_markdown=content,
+                    idempotency_key=f"sc-{note_kind}-{on_date.isoformat()}",
+                )
+                is_update = False
+            note_id = str(response.get("id", ""))
+            url = str(response.get("url", ""))
+            _record_publication(
+                conn,
+                note_kind=note_kind,
+                on_date=on_date,
+                note_id=note_id,
+                folder_id=target_folder,
+                url=url,
+            )
+
+        _logger.info(
+            "Craft %s: %s (%s)", "update" if is_update else "publish", note_id, url
+        )
+        return CraftPublishResult(
+            note_id=note_id,
+            url=url,
+            folder_id=target_folder,
+            published_at=now_utc(),
+            is_update=is_update,
+        )
+
+    def _get_client(self) -> CraftClient:
+        if self._client is not None:
+            return self._client
+        token = settings.craft_api_token
+        if token is None:
+            raise CraftAuthError(
+                "CRAFT_API_TOKEN 미설정 — .env.local에 추가 후 재시도"
+            )
+        self._client = CraftClient(
+            token=token.get_secret_value(),
+            base_url=settings.craft_api_base_url,
+        )
+        return self._client
+
+
+def _find_publication(
+    conn: sqlite3.Connection, note_kind: str, on_date: date_cls
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT id, note_id, folder_id, url
+        FROM craft_publications
+        WHERE note_kind = ? AND on_date = ?
+        """,
+        (note_kind, on_date.isoformat()),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _record_publication(
+    conn: sqlite3.Connection,
+    *,
+    note_kind: str,
+    on_date: date_cls,
+    note_id: str,
+    folder_id: str,
+    url: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO craft_publications
+          (note_kind, on_date, note_id, folder_id, url, published_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(note_kind, on_date) DO UPDATE SET
+          note_id = excluded.note_id,
+          folder_id = excluded.folder_id,
+          url = excluded.url,
+          published_at = excluded.published_at
+        """,
+        (
+            note_kind,
+            on_date.isoformat(),
+            note_id,
+            folder_id,
+            url,
+            to_iso_utc(now_utc()),
+        ),
+    )
+
+
+# Phase B의 discover에서 import한 ImportError 회피용 — CraftPublisher 노출
+__all__ = [
+    "CraftAPIError",
+    "CraftAuthError",
+    "CraftExporter",
+    "CraftPublishResult",
+    "CraftPublisher",
+]

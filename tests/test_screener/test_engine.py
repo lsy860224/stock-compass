@@ -28,14 +28,19 @@ def db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return p
 
 
-def _seed_score(db: Path, ticker: str, total: float) -> None:
-    """v_latest_scores 조회용 최소 시드."""
+def _seed_score(
+    db: Path,
+    ticker: str,
+    total: float,
+    *,
+    market: str = "US",
+    price: float = 200.0,
+) -> None:
+    """v_latest_scores 조회용 최소 시드. price는 composite_scores.price_at_score로 저장."""
     factors = [
         FactorScore(
-            name=n,  # type: ignore[arg-type]
-            score=total,
-            weight=DEFAULT_WEIGHTS[n],  # type: ignore[index]
-            raw_values=(
+            name=n,            score=total,
+            weight=DEFAULT_WEIGHTS[n],            raw_values=(
                 {"per": 12.0, "pbr": 1.1, "peg": 1.2, "dividend_yield": 0.02}
                 if n == "valuation"
                 else {"roe": 0.15, "revenue_growth_yoy": 0.12, "operating_margin": 0.15}
@@ -49,12 +54,13 @@ def _seed_score(db: Path, ticker: str, total: float) -> None:
     ]
     score = CompositeScore(
         ticker=ticker,
-        market="US",
+        market=market,  # type: ignore[arg-type]
         total_score=total,
         verdict="관심권" if total >= 70 else "중립" if total >= 50 else "주의",
         factors=factors,
         computed_at=datetime.now(UTC),
-        currency="USD",
+        price_at_score=price,
+        currency="USD" if market == "US" else "KRW",
         name=f"{ticker} Inc.",
         sector="Tech",
         yfinance_symbol=ticker,
@@ -191,3 +197,55 @@ class TestViewQueries:
             ).fetchone()
         assert row[0] == "test"
         assert row[1] == 1
+
+
+class TestBudgetFilter:
+    def test_excludes_over_budget(self, db_path: Path) -> None:
+        _seed_score(db_path, "AAPL", 50.0, market="US", price=150.0)
+        _seed_score(db_path, "MSFT", 50.0, market="US", price=400.0)
+        result = ScreenerEngine().run_sql(
+            "SELECT code, price FROM v_latest_scores ORDER BY code",
+            budget=200.0,
+        )
+        codes = [r["code"] for r in result.rows]
+        assert codes == ["AAPL"]
+
+    def test_includes_at_budget_boundary(self, db_path: Path) -> None:
+        _seed_score(db_path, "AAPL", 50.0, market="US", price=200.0)
+        result = ScreenerEngine().run_sql(
+            "SELECT code, price FROM v_latest_scores",
+            budget=200.0,
+        )
+        assert {r["code"] for r in result.rows} == {"AAPL"}
+
+    def test_market_filter_separates_currencies(self, db_path: Path) -> None:
+        # KR 종목 (price 200 KRW도 가능 — 환산 없이 비교)
+        _seed_score(db_path, "005930", 50.0, market="KR", price=100.0)
+        _seed_score(db_path, "AAPL", 50.0, market="US", price=100.0)
+        # KR + budget=150 → US 자동 제외
+        result = ScreenerEngine().run_sql(
+            "SELECT code, market, price FROM v_latest_scores ORDER BY code",
+            budget=150.0,
+            budget_market="KR",
+        )
+        codes = [r["code"] for r in result.rows]
+        assert codes == ["005930"]
+
+    def test_missing_price_column_rejected(self, db_path: Path) -> None:
+        _seed_score(db_path, "AAPL", 50.0)
+        with pytest.raises(ScreenerError, match="price 컬럼"):
+            ScreenerEngine().run_sql(
+                "SELECT code, name FROM v_latest_scores",  # price 없음
+                budget=200.0,
+            )
+
+    def test_price_alias_krw_works(self, db_path: Path) -> None:
+        _seed_score(db_path, "005930", 50.0, market="KR", price=90000.0)
+        _seed_score(db_path, "005380", 50.0, market="KR", price=200000.0)
+        # alias로 price_krw 노출되도 budget 적용
+        result = ScreenerEngine().run_sql(
+            "SELECT code, ROUND(price, 0) AS price_krw FROM v_latest_scores",
+            budget=100000.0,
+        )
+        codes = [r["code"] for r in result.rows]
+        assert codes == ["005930"]

@@ -26,10 +26,8 @@ def _mk(
 ) -> CompositeScore:
     factors = [
         FactorScore(
-            name=n,  # type: ignore[arg-type]
-            score=total,
-            weight=DEFAULT_WEIGHTS[n],  # type: ignore[index]
-            note=f"{n} note",
+            name=n,            score=total,
+            weight=DEFAULT_WEIGHTS[n],            note=f"{n} note",
             raw_values={"per": 15.0} if n == "valuation" else {},
         )
         for n in DEFAULT_WEIGHTS

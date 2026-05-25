@@ -11,6 +11,7 @@ from stock_compass.db.schema import (
     MIGRATION_001_INITIAL,
     MIGRATION_002_HYBRID_SENTIMENT,
     MIGRATION_003_SCREENER,
+    MIGRATION_004_CRAFT_PUBLICATIONS,
     SCREENER_VIEWS_DDL,
 )
 from stock_compass.utils.logging import get_logger
@@ -32,6 +33,11 @@ MIGRATIONS: Sequence[Migration] = (
         version=3,
         name="screener",
         sql=MIGRATION_003_SCREENER + "\n" + SCREENER_VIEWS_DDL,
+    ),
+    Migration(
+        version=4,
+        name="craft_publications",
+        sql=MIGRATION_004_CRAFT_PUBLICATIONS,
     ),
 )
 
