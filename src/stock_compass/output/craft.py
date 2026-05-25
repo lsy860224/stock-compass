@@ -238,7 +238,11 @@ class CraftPublisher:
         folder_id: str | None = None,
         note_kind: str = "daily",
     ) -> CraftPublishResult:
-        """일일 노트 발행. 같은 (note_kind, on_date)가 이미 있으면 update."""
+        """일일 노트 발행 (2단계: POST /documents → POST /blocks).
+
+        같은 (note_kind, on_date) 발행 기록이 있으면 기존 문서 delete 후 신규 생성
+        (URL은 매번 새로 발급되지만 노트 누적되지 않아 깔끔).
+        """
         target_folder = folder_id or self.default_folder_id
         if not target_folder:
             raise CraftAuthError(
@@ -252,38 +256,44 @@ class CraftPublisher:
 
         with get_db_connection() as conn:
             existing = _find_publication(conn, note_kind, on_date)
+            is_update = existing is not None
+
+            # 갱신: 기존 문서 soft-delete (휴지통). 실패해도 신규 생성은 계속.
             if existing:
-                response = client.update_note(
-                    existing["note_id"],
-                    title=title,
-                    content_markdown=content,
+                try:
+                    client.delete_documents([existing["note_id"]])
+                except CraftAPIError as e:
+                    _logger.warning(
+                        "이전 노트 삭제 실패 (계속 진행): %s — %s",
+                        existing["note_id"],
+                        e,
+                    )
+
+            # 신규 문서 + 본문 블록 추가
+            created = client.create_document(folder_id=target_folder, title=title)
+            new_id = str(created.get("id", ""))
+            new_url = str(created.get("clickableLink", ""))
+            if not new_id:
+                raise CraftAPIError(
+                    f"문서 생성 응답에 id 없음: {created}"
                 )
-                is_update = True
-            else:
-                response = client.post_note(
-                    target_folder,
-                    title=title,
-                    content_markdown=content,
-                    idempotency_key=f"sc-{note_kind}-{on_date.isoformat()}",
-                )
-                is_update = False
-            note_id = str(response.get("id", ""))
-            url = str(response.get("url", ""))
+            client.append_markdown_blocks(document_id=new_id, markdown=content)
+
             _record_publication(
                 conn,
                 note_kind=note_kind,
                 on_date=on_date,
-                note_id=note_id,
+                note_id=new_id,
                 folder_id=target_folder,
-                url=url,
+                url=new_url,
             )
 
         _logger.info(
-            "Craft %s: %s (%s)", "update" if is_update else "publish", note_id, url
+            "Craft %s: %s (%s)", "update" if is_update else "publish", new_id, new_url
         )
         return CraftPublishResult(
-            note_id=note_id,
-            url=url,
+            note_id=new_id,
+            url=new_url,
             folder_id=target_folder,
             published_at=now_utc(),
             is_update=is_update,
@@ -297,10 +307,9 @@ class CraftPublisher:
             raise CraftAuthError(
                 "CRAFT_API_TOKEN 미설정 — .env.local에 추가 후 재시도"
             )
-        self._client = CraftClient(
-            token=token.get_secret_value(),
-            base_url=settings.craft_api_base_url,
-        )
+        # CRAFT_API_TOKEN은 실제로는 base URL (secret 포함).
+        # 예: https://connect.craft.do/links/<secret>/api/v1
+        self._client = CraftClient(base_url=token.get_secret_value())
         return self._client
 
 

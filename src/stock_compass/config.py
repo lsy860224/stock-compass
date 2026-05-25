@@ -63,10 +63,14 @@ class Settings(BaseSettings):
     naver_client_secret: SecretStr | None = None
 
     # ─── Craft (선택, Phase 5+) ───
+    # CRAFT_API_TOKEN은 Craft Imagine 탭에서 받은 "API URL" 그대로 (secret 포함).
+    # 예: https://connect.craft.do/links/<secret>/api/v1 — 헤더 인증 불필요.
     craft_api_token: SecretStr | None = None
     craft_daily_folder_id: str | None = None
     craft_tickers_folder_id: str | None = None
-    craft_api_base_url: str = "https://www.craft.do/api/v1"
+    # Deprecated — Craft 공식 API는 URL 자체에 secret 포함이라 별도 base 불필요.
+    # 환경변수가 남아 있어도 무시 (호환성).
+    craft_api_base_url: str = "https://connect.craft.do"
 
     # ─── Sentiment 모드 (하이브리드 기본) ───
     sentiment_mode: SentimentMode = "hybrid"

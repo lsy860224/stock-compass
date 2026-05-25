@@ -1,13 +1,18 @@
-"""Craft REST API HTTP 클라이언트 — 격리 레이어.
+"""Craft Space API HTTP 클라이언트 — 격리 레이어.
 
-Craft Pro API의 정확한 endpoint/payload는 사용자 환경에 따라 다를 수 있어
-여기에 격리. 변경 시 이 모듈만 수정.
+실제 Craft API 스펙 (2026-05 검증):
+- Base URL = CRAFT_API_TOKEN 값 자체 (`https://connect.craft.do/links/<secret>/api/v1`).
+  URL에 인증 secret이 포함되어 있어 별도 Authorization 헤더 불필요.
+- 발급: Craft 앱 → Imagine 탭 → Add API Connection (폴더 scope 권장)
+- OpenAPI spec: `<base_url>/openapi.json`
 
-가정 (사용자가 Craft Settings → API에서 확인 필요):
-- Endpoint: POST {base_url}/folders/{folder_id}/notes
-- Auth: Bearer token (Authorization 헤더)
-- Payload: {"title": "...", "content_markdown": "..."}
-- 응답: {"id": "...", "url": "...", "folder_id": "..."}
+발행 흐름 (2단계):
+1) POST /documents — 문서 생성 (title만 받음)
+2) POST /blocks --pageId=<documentId> --markdown=<content>
+   markdown의 `\n\n` paragraph break를 craft가 자동으로 여러 블록으로 분리.
+
+갱신 전략: DELETE /documents + 새 POST /documents (URL은 매번 새로 발급되지만 노트가
+누적되지 않아 깔끔. craft_publications에 새 ID 갱신).
 """
 
 from __future__ import annotations
@@ -22,11 +27,11 @@ _logger = get_logger(__name__)
 
 
 class CraftAPIError(RuntimeError):
-    """Craft API 호출 실패 (인증·rate limit·서버 오류 포함)."""
+    """Craft API 호출 실패 (네트워크·400~599 응답 포함)."""
 
 
 class CraftAuthError(CraftAPIError):
-    """401/403 — 토큰 누락 또는 무효."""
+    """URL secret 잘못됐거나 만료 (401/403) — 사용자가 새 connection 발급 필요."""
 
 
 class CraftRateLimitError(CraftAPIError):
@@ -34,75 +39,84 @@ class CraftRateLimitError(CraftAPIError):
 
 
 class CraftClient:
-    """얇은 httpx 래퍼. tenacity 재시도는 호출자가 적용."""
+    """얇은 httpx 래퍼. URL 인증 패턴 — 헤더 없음."""
 
     def __init__(
         self,
         *,
-        token: str,
-        base_url: str = "https://www.craft.do/api/v1",
-        timeout_sec: float = 10.0,
+        base_url: str,
+        timeout_sec: float = 15.0,
     ) -> None:
-        self._token = token
+        # base_url 자체가 secret 포함이라 그대로 보관 (로깅 시 마스킹 필요)
         self.base_url = base_url.rstrip("/")
         self.timeout_sec = timeout_sec
 
-    def post_note(
-        self,
-        folder_id: str,
-        *,
-        title: str,
-        content_markdown: str,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """폴더에 새 노트 생성. 응답 JSON 반환."""
-        payload = {
-            "title": title,
-            "content_markdown": content_markdown,
-        }
-        headers = self._headers(idempotency_key=idempotency_key)
-        return self._request(
-            "POST", f"/folders/{folder_id}/notes", json=payload, headers=headers
-        )
+    # ─── public — 문서 ───
 
-    def update_note(
-        self,
-        note_id: str,
-        *,
-        title: str,
-        content_markdown: str,
-    ) -> dict[str, Any]:
-        """기존 노트 본문 갱신. 응답 JSON 반환."""
-        payload = {"title": title, "content_markdown": content_markdown}
-        return self._request(
-            "PATCH", f"/notes/{note_id}", json=payload, headers=self._headers()
+    def create_document(self, *, folder_id: str, title: str) -> dict[str, Any]:
+        """POST /documents — 폴더에 새 문서 1개 생성. 응답에서 id + clickableLink 반환.
+
+        Response shape: {"items": [{"id", "title", "clickableLink"}]}
+        """
+        payload = {
+            "documents": [{"title": title}],
+            "destination": {"folderId": folder_id},
+        }
+        data = self._request("POST", "/documents", json=payload)
+        items = data.get("items") or []
+        if not items:
+            raise CraftAPIError(f"문서 생성 응답에 items 없음: {data}")
+        return dict(items[0])
+
+    def delete_documents(self, document_ids: list[str]) -> list[str]:
+        """DELETE /documents — soft delete (휴지통으로). 응답: 삭제된 ID 배열."""
+        if not document_ids:
+            return []
+        data = self._request(
+            "DELETE", "/documents", json={"documentIds": document_ids}
         )
+        return list(data.get("items") or [])
+
+    # ─── public — 블록 ───
+
+    def append_markdown_blocks(
+        self, *, document_id: str, markdown: str
+    ) -> list[dict[str, Any]]:
+        """POST /blocks — 문서 끝에 markdown을 텍스트 블록(들)로 추가.
+
+        Craft는 markdown 안의 `\\n\\n` paragraph break를 자동으로 여러 블록으로 분리.
+        헤딩(`## `), 리스트(`- `), 코드펜스(``` ` ```)도 자동 인식.
+        """
+        if not markdown.strip():
+            return []
+        payload = {
+            "blocks": [{"type": "text", "markdown": markdown}],
+            "position": {"position": "end", "pageId": document_id},
+        }
+        data = self._request("POST", "/blocks", json=payload)
+        return list(data.get("items") or [])
 
     # ─── 내부 ───
-
-    def _headers(self, *, idempotency_key: str | None = None) -> dict[str, str]:
-        h = {
-            "Authorization": f"Bearer {self._token}",
-            "Content-Type": "application/json",
-            "User-Agent": "stock-compass/0.1 (Personal use)",
-        }
-        if idempotency_key:
-            h["Idempotency-Key"] = idempotency_key
-        return h
 
     def _request(
         self, method: str, path: str, **kwargs: Any
     ) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
+        headers = kwargs.pop("headers", {}) or {}
+        headers.setdefault("User-Agent", "stock-compass/0.1 (Personal use)")
+        headers.setdefault("Content-Type", "application/json")
+
         try:
             with httpx.Client(timeout=self.timeout_sec) as client:
-                response = client.request(method, url, **kwargs)
+                response = client.request(method, url, headers=headers, **kwargs)
         except httpx.HTTPError as e:
             raise CraftAPIError(f"네트워크 오류: {e}") from e
 
         if response.status_code in (401, 403):
             raise CraftAuthError(
-                f"인증 실패 ({response.status_code}) — CRAFT_API_TOKEN 확인"
+                f"인증 실패 ({response.status_code}) — "
+                "CRAFT_API_TOKEN URL이 만료됐거나 잘못됨. "
+                "Craft 앱 → Imagine 탭에서 새 connection 발급."
             )
         if response.status_code == 429:
             retry_after = response.headers.get("Retry-After", "?")
@@ -111,12 +125,15 @@ class CraftClient:
             )
         if response.status_code >= 400:
             raise CraftAPIError(
-                f"{response.status_code} — {response.text[:200]}"
+                f"{method} {path} — HTTP {response.status_code}: "
+                f"{response.text[:300]}"
             )
         try:
             data = response.json()
         except ValueError as e:
             raise CraftAPIError(f"응답 JSON 파싱 실패: {e}") from e
         if not isinstance(data, dict):
-            raise CraftAPIError(f"응답 형식 오류 (dict 아님): {type(data).__name__}")
+            raise CraftAPIError(
+                f"응답 형식 오류 (dict 아님): {type(data).__name__}"
+            )
         return data

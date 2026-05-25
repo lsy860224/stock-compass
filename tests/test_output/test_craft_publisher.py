@@ -1,4 +1,7 @@
-"""CraftPublisher — 신규 발행 + 갱신 + 인증 실패 + 중복 추적."""
+"""CraftPublisher — 실제 Craft Space API 흐름 (POST /documents + /blocks).
+
+신규 발행 / 갱신(기존 delete + 신규 create) / 인증 실패 시나리오.
+"""
 
 from __future__ import annotations
 
@@ -27,63 +30,145 @@ def db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 class _StubClient:
-    def __init__(self, response: dict[str, Any] | None = None) -> None:
-        self.response = response or {
-            "id": "note_001",
-            "url": "https://craft.do/notes/001",
-            "folder_id": "test_folder_xyz",
+    """CraftClient 인터페이스 흉내내는 stub. 호출 기록 + 가짜 응답."""
+
+    def __init__(
+        self,
+        *,
+        new_id: str = "doc_001",
+        new_url: str = "craftdocs://open?documentId=doc_001",
+        delete_raises: Exception | None = None,
+    ) -> None:
+        self.new_id = new_id
+        self.new_url = new_url
+        self.delete_raises = delete_raises
+        self.create_calls: list[dict[str, Any]] = []
+        self.delete_calls: list[list[str]] = []
+        self.block_calls: list[dict[str, Any]] = []
+
+    def create_document(
+        self, *, folder_id: str, title: str
+    ) -> dict[str, Any]:
+        self.create_calls.append({"folder_id": folder_id, "title": title})
+        return {
+            "id": self.new_id,
+            "title": title,
+            "clickableLink": self.new_url,
         }
-        self.post_calls: list[dict[str, Any]] = []
-        self.update_calls: list[dict[str, Any]] = []
 
-    def post_note(self, folder_id: str, **kwargs: Any) -> dict[str, Any]:
-        self.post_calls.append({"folder_id": folder_id, **kwargs})
-        return self.response
+    def delete_documents(self, document_ids: list[str]) -> list[str]:
+        if self.delete_raises is not None:
+            raise self.delete_raises
+        self.delete_calls.append(list(document_ids))
+        return list(document_ids)
 
-    def update_note(self, note_id: str, **kwargs: Any) -> dict[str, Any]:
-        self.update_calls.append({"note_id": note_id, **kwargs})
-        return self.response
+    def append_markdown_blocks(
+        self, *, document_id: str, markdown: str
+    ) -> list[dict[str, Any]]:
+        self.block_calls.append(
+            {"document_id": document_id, "markdown": markdown}
+        )
+        return [{"id": "b1", "type": "text", "markdown": markdown}]
 
 
-class TestPublishDailyNote:
-    def test_first_publish_inserts_record(self, db_path: Path) -> None:
-        stub = _StubClient()
+# ──────────────────────── 신규 발행 ────────────────────────
+
+
+class TestFirstPublish:
+    def test_creates_document_and_appends_blocks(self, db_path: Path) -> None:
+        stub = _StubClient(new_id="doc_aaa", new_url="craftdocs://aaa")
         publisher = CraftPublisher(client=stub)  # type: ignore[arg-type]
         result = publisher.publish_daily_note(
-            "# Hello\n\n내용", on_date=date(2026, 5, 25)
+            "# Hello\n\n본문 내용", on_date=date(2026, 5, 26)
         )
 
-        assert result.note_id == "note_001"
+        # 호출 검증
+        assert len(stub.create_calls) == 1
+        assert stub.create_calls[0]["title"] == "stock-compass · 2026-05-26"
+        assert stub.create_calls[0]["folder_id"] == "test_folder_xyz"
+        assert stub.delete_calls == []  # 신규는 delete 없음
+        assert len(stub.block_calls) == 1
+        assert stub.block_calls[0]["document_id"] == "doc_aaa"
+        assert stub.block_calls[0]["markdown"] == "# Hello\n\n본문 내용"
+
+        # 반환값
+        assert result.note_id == "doc_aaa"
+        assert result.url == "craftdocs://aaa"
         assert result.is_update is False
-        assert len(stub.post_calls) == 1
-        assert stub.post_calls[0]["title"] == "stock-compass · 2026-05-25"
+
         # DB 기록
         with sqlite3.connect(db_path) as c:
             row = c.execute(
-                "SELECT note_kind, on_date, note_id FROM craft_publications"
+                "SELECT note_kind, on_date, note_id, url FROM craft_publications"
             ).fetchone()
-            assert row == ("daily", "2026-05-25", "note_001")
+            assert row == ("daily", "2026-05-26", "doc_aaa", "craftdocs://aaa")
 
-    def test_second_publish_calls_update(self, db_path: Path) -> None:
-        stub = _StubClient()
+
+# ──────────────────────── 갱신 ────────────────────────
+
+
+class TestUpdate:
+    def test_second_publish_deletes_then_creates(self, db_path: Path) -> None:
+        stub = _StubClient(new_id="doc_v1")
         publisher = CraftPublisher(client=stub)  # type: ignore[arg-type]
-        publisher.publish_daily_note("v1", on_date=date(2026, 5, 25))
-        r2 = publisher.publish_daily_note("v2", on_date=date(2026, 5, 25))
+        publisher.publish_daily_note("v1", on_date=date(2026, 5, 26))
+
+        # 두 번째: 기존 doc_v1 delete + 신규 생성
+        stub.new_id = "doc_v2"
+        stub.new_url = "craftdocs://v2"
+        r2 = publisher.publish_daily_note("v2 본문", on_date=date(2026, 5, 26))
+
+        assert stub.delete_calls == [["doc_v1"]]
+        assert len(stub.create_calls) == 2  # 1차 + 2차
+        assert r2.is_update is True
+        assert r2.note_id == "doc_v2"
+        assert r2.url == "craftdocs://v2"
+
+        # DB는 새 ID로 갱신됨
+        with sqlite3.connect(db_path) as c:
+            row = c.execute(
+                "SELECT note_id, url FROM craft_publications WHERE on_date = ?",
+                ("2026-05-26",),
+            ).fetchone()
+            assert row == ("doc_v2", "craftdocs://v2")
+
+    def test_delete_failure_does_not_block_create(self, db_path: Path) -> None:
+        """이전 노트 delete 실패해도 신규 생성은 계속 진행 (orphan은 사용자가 수동 정리)."""
+        from stock_compass.output._craft_client import CraftAPIError
+
+        stub = _StubClient(new_id="doc_v1")
+        publisher = CraftPublisher(client=stub)  # type: ignore[arg-type]
+        publisher.publish_daily_note("v1", on_date=date(2026, 5, 26))
+
+        stub.delete_raises = CraftAPIError("simulated 500")
+        stub.new_id = "doc_v2"
+        r2 = publisher.publish_daily_note("v2", on_date=date(2026, 5, 26))
 
         assert r2.is_update is True
-        assert len(stub.update_calls) == 1
-        assert stub.update_calls[0]["note_id"] == "note_001"
+        assert r2.note_id == "doc_v2"  # 새 ID로 정상 발행
+        assert stub.delete_calls == []  # delete 호출은 raise로 막힘
 
+
+# ──────────────────────── 노트 종류 ────────────────────────
+
+
+class TestNoteKind:
     def test_different_kind_independent(self, db_path: Path) -> None:
-        # daily + discover:value_growth_kr는 각각 한 번씩 publish 가능
         stub = _StubClient()
         publisher = CraftPublisher(client=stub)  # type: ignore[arg-type]
-        publisher.publish_daily_note("a", on_date=date(2026, 5, 25))
+        publisher.publish_daily_note("daily", on_date=date(2026, 5, 26))
         publisher.publish_daily_note(
-            "b", on_date=date(2026, 5, 25), note_kind="discover:vg_kr"
+            "discover", on_date=date(2026, 5, 26), note_kind="discover:vg_kr"
         )
-        assert len(stub.post_calls) == 2
+        # 둘 다 신규 (서로 다른 kind)
+        assert len(stub.create_calls) == 2
+        assert stub.delete_calls == []
 
+
+# ──────────────────────── 설정 누락 ────────────────────────
+
+
+class TestMissingConfig:
     def test_no_folder_id_raises(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -92,10 +177,8 @@ class TestPublishDailyNote:
         monkeypatch.setattr(settings, "craft_daily_folder_id", None)
         publisher = CraftPublisher(client=_StubClient())  # type: ignore[arg-type]
         with pytest.raises(CraftAuthError, match="CRAFT_DAILY_FOLDER_ID"):
-            publisher.publish_daily_note("x", on_date=date(2026, 5, 25))
+            publisher.publish_daily_note("x", on_date=date(2026, 5, 26))
 
-
-class TestLazyClient:
     def test_no_token_raises_on_publish(
         self, db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -104,39 +187,106 @@ class TestLazyClient:
         monkeypatch.setattr(settings, "craft_api_token", None)
         publisher = CraftPublisher()  # 토큰 없는 lazy 모드
         with pytest.raises(CraftAuthError, match="CRAFT_API_TOKEN"):
-            publisher.publish_daily_note("x", on_date=date(2026, 5, 25))
+            publisher.publish_daily_note("x", on_date=date(2026, 5, 26))
 
 
-class TestIdempotencyKey:
-    def test_post_includes_idempotency_key(self, db_path: Path) -> None:
-        stub = _StubClient()
-        publisher = CraftPublisher(client=stub)  # type: ignore[arg-type]
-        publisher.publish_daily_note(
-            "x", on_date=date(2026, 5, 25), note_kind="daily"
-        )
-        assert (
-            stub.post_calls[0]["idempotency_key"] == "sc-daily-2026-05-25"
-        )
+# ──────────────────────── CraftClient HTTP 동작 ────────────────────────
 
 
 class TestCraftClient:
-    def test_401_raises_auth_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import httpx
+    """httpx mock으로 인증·에러 코드 처리 검증."""
 
+    def test_401_raises_auth_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from stock_compass.output._craft_client import CraftClient
 
-        client = CraftClient(token="bad_token", base_url="https://test.example")
+        client = CraftClient(base_url="https://test.example/api/v1")
 
-        def _fake_request(*args: Any, **kwargs: Any) -> Any:
-            mock_response = MagicMock()
-            mock_response.status_code = 401
-            mock_response.text = "Unauthorized"
-            return mock_response
+        def _fake(*args: Any, **kwargs: Any) -> Any:
+            m = MagicMock()
+            m.status_code = 401
+            m.text = "Unauthorized"
+            return m
 
         with monkeypatch.context() as m:
-            m.setattr("httpx.Client.request", _fake_request)
+            m.setattr("httpx.Client.request", _fake)
             with pytest.raises(CraftAuthError, match="인증 실패"):
-                client.post_note(
-                    "folder_a", title="t", content_markdown="x"
-                )
-        _ = httpx  # silence unused import
+                client.create_document(folder_id="f", title="t")
+
+    def test_429_raises_rate_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from stock_compass.output._craft_client import (
+            CraftClient,
+            CraftRateLimitError,
+        )
+
+        client = CraftClient(base_url="https://test.example/api/v1")
+
+        def _fake(*args: Any, **kwargs: Any) -> Any:
+            m = MagicMock()
+            m.status_code = 429
+            m.headers = {"Retry-After": "60"}
+            m.text = "Too many"
+            return m
+
+        with monkeypatch.context() as m:
+            m.setattr("httpx.Client.request", _fake)
+            with pytest.raises(CraftRateLimitError, match="60"):
+                client.create_document(folder_id="f", title="t")
+
+    def test_create_document_returns_first_item(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from stock_compass.output._craft_client import CraftClient
+
+        client = CraftClient(base_url="https://test.example/api/v1")
+
+        def _fake(*args: Any, **kwargs: Any) -> Any:
+            m = MagicMock()
+            m.status_code = 200
+            m.json.return_value = {
+                "items": [
+                    {"id": "doc_123", "title": "t", "clickableLink": "craftdocs://x"}
+                ]
+            }
+            return m
+
+        with monkeypatch.context() as m:
+            m.setattr("httpx.Client.request", _fake)
+            result = client.create_document(folder_id="f", title="t")
+            assert result["id"] == "doc_123"
+            assert result["clickableLink"] == "craftdocs://x"
+
+    def test_append_markdown_blocks_empty_skips(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from stock_compass.output._craft_client import CraftClient
+
+        client = CraftClient(base_url="https://test.example/api/v1")
+        called: list[Any] = []
+
+        def _fake(*args: Any, **kwargs: Any) -> Any:
+            called.append(kwargs)
+            return MagicMock(status_code=200, json=lambda: {"items": []})
+
+        with monkeypatch.context() as m:
+            m.setattr("httpx.Client.request", _fake)
+            result = client.append_markdown_blocks(document_id="d", markdown="   ")
+            assert result == []
+            assert called == []  # 빈 markdown은 API 호출 없음
+
+    def test_delete_documents_empty_no_op(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from stock_compass.output._craft_client import CraftClient
+
+        client = CraftClient(base_url="https://test.example/api/v1")
+        called: list[Any] = []
+
+        def _fake(*args: Any, **kwargs: Any) -> Any:
+            called.append(kwargs)
+            return MagicMock(status_code=200, json=lambda: {"items": []})
+
+        with monkeypatch.context() as m:
+            m.setattr("httpx.Client.request", _fake)
+            result = client.delete_documents([])
+            assert result == []
+            assert called == []
