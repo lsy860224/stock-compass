@@ -8,11 +8,8 @@ from pathlib import Path
 import pytest
 
 from stock_compass.factors.base import DEFAULT_WEIGHTS, FactorScore
-from stock_compass.output.craft import (
-    CraftExporter,
-    _clean_note,
-    _format_price,
-)
+from stock_compass.output.craft import CraftExporter
+from stock_compass.output.craft_exporter import _clean_note, _format_price
 from stock_compass.scoring.engine import CompositeScore
 
 
