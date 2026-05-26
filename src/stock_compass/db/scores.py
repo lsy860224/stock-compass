@@ -42,7 +42,10 @@ def upsert_composite_score(
         sentiment_factor.source if sentiment_factor else "placeholder"
     )
 
-    conn.execute("BEGIN")
+    # 호출자가 이미 트랜잭션 안에 있으면 nested 시작/커밋 회피 (batch persist 호환).
+    own_transaction = not conn.in_transaction
+    if own_transaction:
+        conn.execute("BEGIN")
     try:
         conn.execute(
             """
@@ -91,9 +94,11 @@ def upsert_composite_score(
                     to_iso_utc(score.computed_at),
                 ),
             )
-        conn.execute("COMMIT")
+        if own_transaction:
+            conn.execute("COMMIT")
     except sqlite3.DatabaseError:
-        conn.execute("ROLLBACK")
+        if own_transaction:
+            conn.execute("ROLLBACK")
         raise
     return ticker_id
 

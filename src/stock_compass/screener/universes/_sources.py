@@ -8,8 +8,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from datetime import date as date_cls
-from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -112,7 +112,7 @@ def _kr_business_day() -> str:
         return str(get_nearest_business_day_in_a_week())
     except (ConnectionError, TimeoutError, ValueError, IndexError, OSError):
         # KRX 자체가 깨졌으면 오늘 날짜 추정 — caller가 빈 리스트 처리
-        return datetime.utcnow().strftime("%Y%m%d")
+        return datetime.now(UTC).strftime("%Y%m%d")
 
 
 # ──────────────────────── US (Wikipedia) ────────────────────────

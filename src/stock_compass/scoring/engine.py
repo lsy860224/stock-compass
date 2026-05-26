@@ -141,9 +141,19 @@ class ScoringEngine:
         if persist and ordered:
             from stock_compass.db import get_db_connection, upsert_composite_score
 
+            # N개 종목 batch persist를 단일 트랜잭션으로 묶어 부분 실패 방지.
+            # upsert_composite_score는 내부적으로 자체 BEGIN/COMMIT을 갖지만
+            # autocommit 모드라서 한 종목 실패가 이전 종목까지 롤백 안 함 — 외부에
+            # IMMEDIATE 트랜잭션으로 한 번 더 감싸 원자성 확보.
             with get_db_connection() as conn:
-                for s in ordered:
-                    upsert_composite_score(conn, s)
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    for s in ordered:
+                        upsert_composite_score(conn, s)
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
 
         return ordered
 
