@@ -1,15 +1,17 @@
 """Fundamentals 팩터 — 매출 성장, 영업이익 YoY, ROE, 영업이익률, FCF yield.
 
-CLAUDE.md 8) 명시 5개 component. 가중치 25% 대비 component 빈약하지 않도록
-영업이익 YoY (yfinance `earningsGrowth`)와 FCF yield (free_cash_flow / market_cap)
-점수화 추가. revenue가 Fundamentals에 없어 FCF "마진" 대신 yield 사용
-(시가총액 대비 FCF 비율 — 가치 평가에 동등하게 유효).
+CLAUDE.md 8) 명시 5개 component. valuation 패턴과 동일하게 sector median
+대비 ratio 점수화 도입 — cold-start(< 3 종목)이거나 음수값이면 절대 임계치
+fallback. 같은 (market, sector) median은 process-level dict 캐시.
+
+각 component는 *높을수록 좋은* 방향 → ratio는 valuation 의 반대 (큰 ratio
+가 높은 점수). negative value는 항상 absolute fallback (sector ratio 무의미).
 """
 
 from __future__ import annotations
 
 from stock_compass.factors.base import DEFAULT_WEIGHTS, FactorScore, neutral
-from stock_compass.markets.base import MarketAdapter
+from stock_compass.markets.base import Market, MarketAdapter
 
 
 def _score_revenue_growth(g: float | None) -> float | None:
@@ -97,19 +99,125 @@ def _score_fcf_yield(
     return 15.0
 
 
+# ──────────────────────── 상대 점수 (sector median) ────────────────────────
+
+
+def _score_ratio_higher_better(
+    value: float | None, median: float | None
+) -> float | None:
+    """value/median 비율 — 클수록 높은 점수 (ROE/margin/growth 등). 둘 다 양수 필요."""
+    if value is None or value <= 0 or median is None or median <= 0:
+        return None
+    ratio = value / median
+    if ratio > 1.6:
+        return 90.0
+    if ratio > 1.2:
+        return 78.0
+    if ratio > 1.0:
+        return 65.0
+    if ratio > 0.7:
+        return 50.0
+    if ratio > 0.4:
+        return 35.0
+    return 20.0
+
+
+# ──────────────────────── sector medians 캐시 ────────────────────────
+
+
+_FUND_MEDIANS_CACHE: dict[tuple[Market, str], dict[str, float | None]] = {}
+
+
+def _get_sector_fundamental_medians(
+    market: Market, sector: str | None
+) -> dict[str, float | None]:
+    if not sector:
+        return {}
+    key: tuple[Market, str] = (market, sector)
+    if key in _FUND_MEDIANS_CACHE:
+        return _FUND_MEDIANS_CACHE[key]
+    from stock_compass.db import get_db_connection, get_sector_fundamental_medians
+
+    with get_db_connection() as conn:
+        medians = get_sector_fundamental_medians(conn, market, sector)
+    _FUND_MEDIANS_CACHE[key] = medians
+    return medians
+
+
+def clear_sector_medians_cache() -> None:
+    """테스트 또는 batch 재실행 시 stale 데이터 제거."""
+    _FUND_MEDIANS_CACHE.clear()
+
+
+# ──────────────────────── 진입점 ────────────────────────
+
+
+def _score_with_sector(
+    value: float | None,
+    median: float | None,
+    absolute_score: float | None,
+) -> tuple[float | None, str]:
+    """median 있고 value 양수면 ratio 점수, 아니면 절대 점수. 사용 method 표시."""
+    if value is not None and value > 0 and median is not None and median > 0:
+        s = _score_ratio_higher_better(value, median)
+        if s is not None:
+            return s, "sector"
+    return absolute_score, "absolute" if absolute_score is not None else "none"
+
+
 def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
     fund = adapter.get_fundamentals(ticker)
+    medians = _get_sector_fundamental_medians(fund.market, fund.sector)
+
+    fcf_yield = (
+        fund.free_cash_flow / fund.market_cap
+        if fund.free_cash_flow is not None
+        and fund.market_cap is not None
+        and fund.market_cap > 0
+        else None
+    )
+
+    # (name, value, median, absolute_score)
+    pairs: list[tuple[str, float | None, float | None, float | None]] = [
+        (
+            "revenue_growth_yoy",
+            fund.revenue_growth_yoy,
+            medians.get("revenue_growth_yoy"),
+            _score_revenue_growth(fund.revenue_growth_yoy),
+        ),
+        (
+            "earnings_growth_yoy",
+            fund.earnings_growth_yoy,
+            medians.get("earnings_growth_yoy"),
+            _score_earnings_growth(fund.earnings_growth_yoy),
+        ),
+        (
+            "roe",
+            fund.roe,
+            medians.get("roe"),
+            _score_roe(fund.roe),
+        ),
+        (
+            "operating_margin",
+            fund.operating_margin,
+            medians.get("operating_margin"),
+            _score_op_margin(fund.operating_margin),
+        ),
+        (
+            "fcf_yield",
+            fcf_yield,
+            medians.get("fcf_yield"),
+            _score_fcf_yield(fund.free_cash_flow, fund.market_cap),
+        ),
+    ]
+
     components: dict[str, float] = {}
-    if (s := _score_revenue_growth(fund.revenue_growth_yoy)) is not None:
-        components["revenue_growth_yoy"] = s
-    if (s := _score_earnings_growth(fund.earnings_growth_yoy)) is not None:
-        components["earnings_growth_yoy"] = s
-    if (s := _score_roe(fund.roe)) is not None:
-        components["roe"] = s
-    if (s := _score_op_margin(fund.operating_margin)) is not None:
-        components["operating_margin"] = s
-    if (s := _score_fcf_yield(fund.free_cash_flow, fund.market_cap)) is not None:
-        components["fcf_yield"] = s
+    methods: dict[str, str] = {}
+    for name, value, median, absolute in pairs:
+        s, method = _score_with_sector(value, median, absolute)
+        if s is not None:
+            components[name] = s
+            methods[name] = method
 
     if not components:
         return neutral(
@@ -124,12 +232,11 @@ def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
             },
         )
 
-    fcf_yield = (
-        fund.free_cash_flow / fund.market_cap
-        if fund.free_cash_flow is not None
-        and fund.market_cap is not None
-        and fund.market_cap > 0
-        else None
+    sector_methods = [n for n, m in methods.items() if m == "sector"]
+    note_method = (
+        f"섹터 중앙값 비교: {','.join(sector_methods)}"
+        if sector_methods
+        else "절대 임계치 (sector cold-start)"
     )
     score = sum(components.values()) / len(components)
     return FactorScore(
@@ -145,8 +252,11 @@ def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
             "free_cash_flow": fund.free_cash_flow,
             "fcf_yield": fcf_yield,
             "market_cap": fund.market_cap,
+            "sector": fund.sector,
+            "sector_medians": medians,
             "component_scores": components,
+            "scoring_method": methods,
         },
-        note=f"사용 지표 {len(components)}개: {', '.join(components)}",
+        note=f"사용 지표 {len(components)}개 ({note_method})",
         source=fund.source,
     )
