@@ -10,12 +10,15 @@ import pytest
 from stock_compass.db import migrate
 from stock_compass.screener.universes import (
     SUPPORTED_UNIVERSES,
+    UNIVERSE_ALL_KR,
     UNIVERSE_KOSPI_200,
     UNIVERSE_SP500,
     UNIVERSE_WATCHLIST,
     UniverseFetchError,
+    add_to_watchlist_group,
     list_universe_members,
     refresh,
+    refresh_all_kr,
     refresh_kospi_200,
     refresh_sp500,
     refresh_watchlist,
@@ -137,4 +140,87 @@ class TestDispatcher:
         # 정전 리스트 확인 — 후속 universe 추가 시 갱신 필요
         assert "WATCHLIST" in SUPPORTED_UNIVERSES
         assert "KOSPI_200" in SUPPORTED_UNIVERSES
+        assert "ALL_KR" in SUPPORTED_UNIVERSES
         assert "SP500" in SUPPORTED_UNIVERSES
+
+    def test_all_kr_dispatcher(
+        self, conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # KOSPI + KOSDAQ 합집합 — 중복 코드는 dedup
+        monkeypatch.setattr(
+            "stock_compass.screener.universes._sources.fetch_kospi_200_constituents",
+            lambda: [("005930", "삼성전자"), ("000660", "SK하이닉스")],
+        )
+        monkeypatch.setattr(
+            "stock_compass.screener.universes._sources.fetch_kosdaq_150_constituents",
+            lambda: [("000660", "SK하이닉스"), ("035720", "카카오")],  # 000660 dedup
+        )
+        r = refresh(conn, "ALL_KR")
+        assert r.universe_code == UNIVERSE_ALL_KR
+        assert r.members == 3  # 005930, 000660, 035720
+
+
+class TestAllKr:
+    def test_refresh_all_kr_dedups(
+        self, conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "stock_compass.screener.universes._sources.fetch_kospi_200_constituents",
+            lambda: [("005930", "삼성전자"), ("000660", "SK하이닉스")],
+        )
+        monkeypatch.setattr(
+            "stock_compass.screener.universes._sources.fetch_kosdaq_150_constituents",
+            lambda: [("000660", "SK하이닉스"), ("091990", "셀트리온헬스케어")],
+        )
+        r = refresh_all_kr(conn)
+        codes = {
+            row["code"]
+            for row in list_universe_members(conn, universe_code=UNIVERSE_ALL_KR)
+        }
+        assert codes == {"005930", "000660", "091990"}
+        assert r.members == 3
+
+    def test_refresh_all_kr_empty_raises(
+        self, conn: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "stock_compass.screener.universes._sources.fetch_kospi_200_constituents",
+            lambda: [],
+        )
+        monkeypatch.setattr(
+            "stock_compass.screener.universes._sources.fetch_kosdaq_150_constituents",
+            lambda: [],
+        )
+        with pytest.raises(UniverseFetchError, match="멤버 0개"):
+            refresh_all_kr(conn)
+
+
+class TestAddToWatchlistGroup:
+    def test_add_to_group(self, conn: sqlite3.Connection) -> None:
+        pairs = [
+            ("005930", "KR", None, None),
+            ("AAPL", "US", None, None),
+        ]
+        r = add_to_watchlist_group(conn, "screening", pairs)
+        assert r.universe_code == "WATCHLIST_SCREENING"
+        assert r.members == 2
+        codes = {
+            row["code"]
+            for row in list_universe_members(
+                conn, universe_code="WATCHLIST_SCREENING"
+            )
+        }
+        assert codes == {"005930", "AAPL"}
+
+    def test_invalid_group_name_raises(self, conn: sqlite3.Connection) -> None:
+        with pytest.raises(ValueError, match="group은"):
+            add_to_watchlist_group(conn, "bad name with space", [])
+        with pytest.raises(ValueError, match="group은"):
+            add_to_watchlist_group(conn, "with-hyphen", [])
+
+    def test_idempotent_same_day(self, conn: sqlite3.Connection) -> None:
+        pairs = [("005930", "KR", None, None)]
+        r1 = add_to_watchlist_group(conn, "tier1", pairs)
+        r2 = add_to_watchlist_group(conn, "tier1", pairs)
+        assert r1.members == 1
+        assert r2.members == 0  # dedup

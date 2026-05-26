@@ -37,6 +37,7 @@ SUPPORTED_UNIVERSES = (
     UNIVERSE_WATCHLIST,
     UNIVERSE_KOSPI_200,
     UNIVERSE_KOSDAQ_150,
+    UNIVERSE_ALL_KR,
     UNIVERSE_SP500,
     UNIVERSE_NASDAQ_100,
     UNIVERSE_DOW30,
@@ -71,6 +72,8 @@ def refresh(
         return refresh_kospi_200(conn, on_date=on_date)
     if code == UNIVERSE_KOSDAQ_150:
         return refresh_kosdaq_150(conn, on_date=on_date)
+    if code == UNIVERSE_ALL_KR:
+        return refresh_all_kr(conn, on_date=on_date)
     if code == UNIVERSE_SP500:
         return refresh_sp500(conn, on_date=on_date)
     if code == UNIVERSE_NASDAQ_100:
@@ -122,6 +125,41 @@ def refresh_kosdaq_150(
         _sources.fetch_kosdaq_150_constituents,
         on_date=on_date,
     )
+
+
+def refresh_all_kr(
+    conn: sqlite3.Connection, *, on_date: date_cls | None = None
+) -> UniverseRefreshResult:
+    """KOSPI 200 + KOSDAQ 150 합집합 — 한국 시장 광역 발굴용.
+
+    KOSPI/KOSDAQ 시장 구분은 _guess_symbol/markets.kr이 ticker 코드로 처리.
+    """
+    return _refresh_kr(
+        conn,
+        UNIVERSE_ALL_KR,
+        _sources.fetch_all_kr_constituents,
+        on_date=on_date,
+    )
+
+
+def add_to_watchlist_group(
+    conn: sqlite3.Connection,
+    group: str,
+    pairs: Iterable[tuple[str, Market, str | None, str | None]],
+    *,
+    on_date: date_cls | None = None,
+) -> UniverseRefreshResult:
+    """발굴 종목을 `WATCHLIST_<GROUP>` universe로 등록 — `screen --add-to-watchlist` 진입점.
+
+    .env의 WATCHLIST_KR/US와 분리된 사용자 그룹. batch 자동 추적은 .env 갱신
+    필요(이 함수는 후속 안내를 호출자가 출력하도록 universe 등록만 수행).
+    """
+    if not group or not group.replace("_", "").isalnum():
+        raise ValueError(
+            f"group은 영숫자+언더바만 허용 (받음: {group!r})"
+        )
+    universe_code = f"WATCHLIST_{group.upper()}"
+    return _bulk_register(conn, universe_code, list(pairs), on_date=on_date)
 
 
 def refresh_sp500(

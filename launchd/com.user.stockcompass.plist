@@ -123,9 +123,9 @@
       <key>Minute</key><integer>30</integer>
     </dict>
 
-    <!-- 주간 종목 발굴 (토요일 08:00 KST = Weekday 7) -->
+    <!-- 주간 종목 발굴 (토요일 08:00 KST). launchd 컨벤션: 0/7=일요일, 1=월…6=토. -->
     <dict>
-      <key>Weekday</key><integer>7</integer>
+      <key>Weekday</key><integer>6</integer>
       <key>Hour</key><integer>8</integer>
       <key>Minute</key><integer>0</integer>
     </dict>
