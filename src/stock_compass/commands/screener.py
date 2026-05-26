@@ -56,6 +56,34 @@ def screen(
     list_fields_flag: Annotated[
         bool, typer.Option("--list-fields", help="v_latest_scores 칼럼 치트시트")
     ] = False,
+    add_to_watchlist: Annotated[
+        bool,
+        typer.Option(
+            "--add-to-watchlist",
+            help="결과 종목을 WATCHLIST_<GROUP> universe에 등록 (--group 으로 그룹 지정)",
+        ),
+    ] = False,
+    watchlist_group: Annotated[
+        str,
+        typer.Option(
+            "--group",
+            help="--add-to-watchlist 그룹 이름 (영숫자+언더바, 기본 'screening')",
+        ),
+    ] = "screening",
+    prompt_deepdive: Annotated[
+        bool,
+        typer.Option(
+            "--prompt-deepdive",
+            help="결과 종목 sentiment 심층 분석 prompt MD 생성 (Claude.ai 복붙용)",
+        ),
+    ] = False,
+    interactive: Annotated[
+        bool,
+        typer.Option(
+            "--interactive",
+            help="인터랙티브 SQL REPL (Phase 7-8 미구현 — 친절 안내만)",
+        ),
+    ] = False,
 ) -> None:
     """SQL 스크리너 — RO 모드 + LIMIT 강제 + 안전 검증 + 예산 필터."""
     from stock_compass.config import settings
@@ -76,6 +104,16 @@ def screen(
 
     setup_logging(settings.log_dir)
 
+    if interactive:
+        console.print(
+            "[yellow]--interactive REPL은 Phase 7-8 (선택) 미구현입니다.[/yellow]\n"
+            "[dim]대안:[/dim]\n"
+            "  · [cyan]stock-compass screen --preset <name>[/cyan] — 프리셋 실행\n"
+            "  · [cyan]stock-compass screen --file path.sql[/cyan] — 저장된 SQL\n"
+            "  · [cyan]stock-compass screen --sql \"...\"[/cyan] — 인라인 SQL\n"
+            "  · [cyan]stock-compass screen --list-fields[/cyan] — 칼럼 치트시트"
+        )
+        raise typer.Exit(code=2)
     if list_presets_flag:
         _print_preset_catalog(list_presets())
         return
@@ -141,6 +179,11 @@ def screen(
     else:
         console.print(f"[red]지원하지 않는 format: {fmt} (table/csv/json만)[/red]")
         raise typer.Exit(code=2)
+
+    if add_to_watchlist:
+        _add_screener_to_watchlist(result.rows, group=watchlist_group)
+    if prompt_deepdive:
+        _generate_deepdive_prompt(result.rows, preset_name=preset_name)
 
 
 @app.command()
@@ -451,6 +494,66 @@ def screener_rows_to_targets(
             continue
         out.append((str(ticker), row_market))
     return out
+
+
+def _add_screener_to_watchlist(
+    rows: list[dict[str, Any]], *, group: str
+) -> None:
+    """`screen --add-to-watchlist` — 결과 종목을 WATCHLIST_<GROUP> universe에 등록."""
+    from stock_compass.db import get_db_connection
+    from stock_compass.screener.universes import (
+        add_to_watchlist_group,
+    )
+
+    targets = screener_rows_to_targets(rows, default_market=None)
+    if not targets:
+        console.print(
+            "[yellow]code/market 컬럼 없어 워치리스트 추가 생략.[/yellow]"
+        )
+        return
+
+    pairs: list[tuple[str, Market, str | None, str | None]] = [
+        (code, market, None, None) for code, market in targets
+    ]
+    try:
+        with get_db_connection() as conn:
+            r = add_to_watchlist_group(conn, group, pairs)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=2) from e
+
+    console.print(
+        f"[green]✓[/green] [cyan]{r.universe_code}[/cyan] — "
+        f"{r.members}종목 신규 등록 (대상 {len(pairs)}, 기존 멤버는 dedup)"
+    )
+    console.print(
+        "[dim]자동 batch 추적은 .env의 WATCHLIST_KR/US에 직접 추가 필요.[/dim]"
+    )
+
+
+def _generate_deepdive_prompt(
+    rows: list[dict[str, Any]], *, preset_name: str | None
+) -> None:
+    """`screen --prompt-deepdive` — 결과 종목 sentiment prompt MD 생성."""
+    from stock_compass.output.prompt_generator import PromptGenerator
+
+    targets = screener_rows_to_targets(rows, default_market=None)
+    if not targets:
+        console.print(
+            "[yellow]code/market 컬럼 없어 deepdive prompt 생략.[/yellow]"
+        )
+        return
+
+    tag = f"deepdive-{preset_name}" if preset_name else "deepdive"
+    result = PromptGenerator().generate_sentiment_prompt(targets, tag=tag)
+    console.print(
+        f"[green]✓[/green] deepdive prompt: [cyan]{result.path}[/cyan]"
+        f"  ({result.ticker_count}종목, 파일 {result.file_count}개)"
+    )
+    console.print(
+        "[dim]Claude.ai에 복붙 → 응답 받아 "
+        f"[cyan]stock-compass sentiment import --batch-id {result.batch_id}[/cyan][/dim]"
+    )
 
 
 def _publish_discover_to_craft(

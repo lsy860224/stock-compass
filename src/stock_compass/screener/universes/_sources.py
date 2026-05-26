@@ -50,6 +50,22 @@ def fetch_kosdaq_150_constituents() -> list[tuple[str, str]]:
     return _fetch_kr_index(KOSDAQ_150_INDEX_CODE, cache_key="kosdaq_150")
 
 
+def fetch_all_kr_constituents() -> list[tuple[str, str]]:
+    """KOSPI 200 + KOSDAQ 150 합집합. 코드 기준 중복 제거.
+
+    docs/SCREENER_SPEC.md:402의 ALL_KR 광고. 전체 KRX 종목(~2,500)은 부담이라
+    벤치마크 지수 합집합(~350)으로 시작. 양쪽 모두 실패하면 빈 리스트.
+    """
+    seen: dict[str, str] = {}
+    for fetcher in (fetch_kospi_200_constituents, fetch_kosdaq_150_constituents):
+        try:
+            for code, name in fetcher():
+                seen.setdefault(code, name)
+        except (ConnectionError, TimeoutError, OSError) as e:
+            _logger.warning("ALL_KR 일부 소스 실패 — 다른 소스 계속: %s", e)
+    return list(seen.items())
+
+
 def _fetch_kr_index(index_code: str, *, cache_key: str) -> list[tuple[str, str]]:
     cached = _read_fallback(cache_key)
     try:
