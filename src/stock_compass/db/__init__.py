@@ -34,6 +34,7 @@ from stock_compass.db.scores import (
     get_previous_composite_score,
     get_score_history,
     get_scores_on_date,
+    get_sector_valuation_medians,
     upsert_composite_score,
 )
 from stock_compass.db.tickers import (
@@ -63,6 +64,7 @@ __all__ = [
     "get_recent_news_summaries",
     "get_score_history",
     "get_scores_on_date",
+    "get_sector_valuation_medians",
     "get_ticker_id",
     "get_today_token_usage",
     "get_trades",

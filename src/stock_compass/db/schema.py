@@ -312,3 +312,10 @@ CREATE INDEX IF NOT EXISTS idx_craft_publications_kind_date
 """
 
 
+# concerns 칼럼 — Claude.ai prompt 응답이 명시한 주의사항을 보존 (이전엔 폐기됐음).
+# JSON 배열로 저장. API 경로는 빈 배열.
+MIGRATION_005_NEWS_CONCERNS = """
+ALTER TABLE news_summaries ADD COLUMN concerns TEXT NOT NULL DEFAULT '[]';
+"""
+
+

@@ -1,13 +1,20 @@
-"""alerts 테이블 — 3종 트리거 발화 이력 + 중복 방지."""
+"""alerts 테이블 — 3종 트리거 발화 이력 + 중복 방지.
+
+dedup 비교는 모두 Python 측에서 cutoff를 ISO+TZ 포맷으로 계산하여 binding.
+`fired_at` 칼럼이 `to_iso_utc()` 결과(`YYYY-MM-DDTHH:MM:SS+00:00`)로 저장되므로
+SQLite `datetime('now')`의 naive `YYYY-MM-DD HH:MM:SS`와 lexical 비교하면
+'T'(84) > ' '(32) 차이로 dedup 창이 약 1~2시간 길어진다. 통일 필수.
+"""
 
 from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
 from datetime import date as date_cls
+from datetime import datetime, time, timedelta
 from typing import Any
 
-from stock_compass.utils.dates import today_kst
+from stock_compass.utils.dates import KST, now_utc, to_iso_utc, today_kst
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,14 +36,15 @@ def has_recent_alert(
     hours: int = 24,
 ) -> bool:
     """동일 종목·동일 trigger가 N시간 내 발화된 적 있는지."""
+    cutoff = to_iso_utc(now_utc() - timedelta(hours=hours))
     row = conn.execute(
         """
         SELECT 1 FROM alerts
         WHERE ticker_id = ? AND trigger_type = ?
-          AND fired_at > datetime('now', ?)
+          AND fired_at > ?
         LIMIT 1
         """,
-        (ticker_id, trigger_type, f"-{hours} hours"),
+        (ticker_id, trigger_type, cutoff),
     ).fetchone()
     return row is not None
 
@@ -45,14 +53,19 @@ def has_daily_alert_today(
     conn: sqlite3.Connection, *, on_date: date_cls | None = None
 ) -> bool:
     """일일 리포트 알림이 오늘(KST 기준) 이미 발화됐는지."""
-    d = (on_date or today_kst()).isoformat()
+    d = on_date or today_kst()
+    # KST 일자의 00:00 ~ 24:00을 UTC ISO 범위로 환산하여 비교
+    start_utc = to_iso_utc(datetime.combine(d, time(0, 0), tzinfo=KST))
+    end_utc = to_iso_utc(
+        datetime.combine(d, time(0, 0), tzinfo=KST) + timedelta(days=1)
+    )
     row = conn.execute(
         """
         SELECT 1 FROM alerts
-        WHERE trigger_type = 'daily' AND DATE(fired_at, 'localtime') = ?
+        WHERE trigger_type = 'daily' AND fired_at >= ? AND fired_at < ?
         LIMIT 1
         """,
-        (d,),
+        (start_utc, end_utc),
     ).fetchone()
     return row is not None
 
@@ -83,6 +96,7 @@ def get_recent_alerts(
     conn: sqlite3.Connection, *, hours: int = 24
 ) -> list[dict[str, Any]]:
     """최근 N시간 발화된 알림 (목록·디버그용)."""
+    cutoff = to_iso_utc(now_utc() - timedelta(hours=hours))
     rows = conn.execute(
         """
         SELECT a.id, a.trigger_type, a.score_before, a.score_after, a.message,
@@ -90,9 +104,9 @@ def get_recent_alerts(
                t.code, t.market, t.name
         FROM alerts a
         JOIN tickers t ON a.ticker_id = t.id
-        WHERE a.fired_at > datetime('now', ?)
+        WHERE a.fired_at > ?
         ORDER BY a.fired_at DESC
         """,
-        (f"-{hours} hours",),
+        (cutoff,),
     ).fetchall()
     return [dict(r) for r in rows]

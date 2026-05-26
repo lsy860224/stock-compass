@@ -176,6 +176,30 @@ class TestDbPersistence:
         assert rows[0].batch_id == "BX"
         assert rows[0].keywords == ["a", "b"]
 
+    def test_concerns_persisted(
+        self, tmp_path: Path, conn: sqlite3.Connection
+    ) -> None:
+        # 사용자가 제공한 concerns 가 DB에 저장되어야 함 (이전엔 폐기됐던 필드)
+        body = (
+            '{"batch_id":"BC","results":[{"ticker":"005930",'
+            '"summary":"x","tone_score":-1,"keywords":["반도체"],'
+            '"concerns":["환율 불확실성","HBM 경쟁 심화"]}]}'
+        )
+        import_response(conn, _write(tmp_path, body), archive=False)
+        rows = get_recent_news_summaries(conn, ticker_id=1, days=1)
+        assert rows[0].concerns == ["환율 불확실성", "HBM 경쟁 심화"]
+
+    def test_concerns_default_empty(
+        self, tmp_path: Path, conn: sqlite3.Connection
+    ) -> None:
+        body = (
+            '{"batch_id":"BD","results":[{"ticker":"005930",'
+            '"summary":"x","tone_score":0,"keywords":[]}]}'
+        )
+        import_response(conn, _write(tmp_path, body), archive=False)
+        rows = get_recent_news_summaries(conn, ticker_id=1, days=1)
+        assert rows[0].concerns == []
+
     def test_unknown_ticker_warns_skip(
         self, tmp_path: Path, conn: sqlite3.Connection
     ) -> None:

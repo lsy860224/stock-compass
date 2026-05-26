@@ -294,6 +294,54 @@ def get_scores_on_date(
     ]
 
 
+def get_sector_valuation_medians(
+    conn: sqlite3.Connection,
+    market: Market,
+    sector: str | None,
+    *,
+    lookback_days: int = 7,
+    min_samples: int = 3,
+) -> dict[str, float | None]:
+    """같은 (market, sector) 종목들의 최근 PER/PBR/PEG 중앙값.
+
+    `factors/valuation`이 절대 임계치 대신 sector-relative 점수화에 사용.
+    표본 < `min_samples` (cold-start)면 빈 dict → factor가 절대 fallback.
+    """
+    if not sector:
+        return {}
+    rows = conn.execute(
+        """
+        SELECT
+          json_extract(fs.raw_values, '$.per') AS per,
+          json_extract(fs.raw_values, '$.pbr') AS pbr,
+          json_extract(fs.raw_values, '$.peg') AS peg
+        FROM factor_scores fs
+        JOIN tickers t ON t.id = fs.ticker_id
+        WHERE t.market = ? AND t.sector = ?
+          AND fs.factor_name = 'valuation'
+          AND fs.date >= date('now', ?)
+        """,
+        (market, sector, f"-{lookback_days} days"),
+    ).fetchall()
+    if len(rows) < min_samples:
+        return {}
+
+    def _median(values: list[float]) -> float | None:
+        clean = sorted(v for v in values if v is not None and v > 0)
+        if not clean:
+            return None
+        n = len(clean)
+        if n % 2:
+            return float(clean[n // 2])
+        return float((clean[n // 2 - 1] + clean[n // 2]) / 2)
+
+    return {
+        "per": _median([float(r["per"]) for r in rows if r["per"] is not None]),
+        "pbr": _median([float(r["pbr"]) for r in rows if r["pbr"] is not None]),
+        "peg": _median([float(r["peg"]) for r in rows if r["peg"] is not None]),
+    }
+
+
 def _row_to_factor(row: sqlite3.Row) -> FactorScore:
     raw = json.loads(row["raw_values"]) if row["raw_values"] else {}
     return FactorScore(
