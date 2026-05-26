@@ -164,6 +164,11 @@ def _ticker_card(rank: int, s: CompositeScore) -> str:
             f" {f.score:.1f} | {_clean_note(f.note)} |"
         )
 
+    # Valuation Range (Phase A) — fundamentals 캐시 적중 시 빠름
+    vrange_md = _valuation_range_md(s)
+    if vrange_md:
+        lines.extend(["", vrange_md])
+
     lines.extend(
         [
             "",
@@ -200,6 +205,47 @@ def _format_price(price: float | None, currency: str | None) -> str:
 def _clean_note(note: str) -> str:
     """마크다운 테이블 안전 — 파이프·줄바꿈 제거."""
     return note.replace("|", "/").replace("\n", " ").strip() or "—"
+
+
+def _valuation_range_md(s: CompositeScore) -> str:
+    """종목별 valuation range를 markdown 표로. fundamentals 호출 실패 시 빈 문자열."""
+    try:
+        from stock_compass.markets import get_adapter
+        from stock_compass.output.valuation_range import (
+            DISCLAIMER as VR_DISCLAIMER,
+        )
+        from stock_compass.output.valuation_range import compute_valuation_range
+
+        adapter = get_adapter(s.ticker, s.market)
+        fund = adapter.get_fundamentals(s.ticker)
+        vr = compute_valuation_range(fund, current_price=s.price_at_score)
+    except Exception:
+        return ""
+
+    if vr.is_empty():
+        return ""
+
+    lines = [
+        "**Valuation Range** (현재 펀더멘털 x 시나리오)",
+        "",
+        "| 시나리오 | 방법 | 배수 | 적정가 | vs 현재 |",
+        "|---|---|---:|---:|---:|",
+    ]
+    for p in vr.points:
+        mul_str = (
+            f"{p.multiple * 100:.1f}%" if p.method == "DIVIDEND" else f"{p.multiple:.1f}x"
+        )
+        price_str = f"{p.fair_price:,.2f} {vr.currency}"
+        vs_str = (
+            f"{'+' if p.vs_current_pct >= 0 else ''}{p.vs_current_pct:.1f}%"
+            if p.vs_current_pct is not None
+            else "—"
+        )
+        lines.append(
+            f"| {p.scenario} | {p.method} | {mul_str} | {price_str} | {vs_str} |"
+        )
+    lines.append(f"\n> _{VR_DISCLAIMER}_")
+    return "\n".join(lines)
 
 
 # ──────────────────────── Craft Pro API publisher ────────────────────────

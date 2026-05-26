@@ -11,6 +11,7 @@ from rich.text import Text
 from rich.tree import Tree
 
 from stock_compass.factors.base import FactorScore
+from stock_compass.output.valuation_range import ValuationRange
 from stock_compass.scoring.engine import DISCLAIMER, CompositeScore, Verdict
 
 if TYPE_CHECKING:
@@ -24,7 +25,7 @@ _VERDICT_STYLE: dict[Verdict, str] = {
 
 
 def render_single_score(score: CompositeScore, console: Console | None = None) -> None:
-    """단일 종목 점수 + 5팩터 분해 + 면책 출력."""
+    """단일 종목 점수 + 5팩터 분해 + valuation range + 면책 출력."""
     console = console or Console()
 
     header = _header_panel(score)
@@ -32,7 +33,60 @@ def render_single_score(score: CompositeScore, console: Console | None = None) -
 
     console.print(header)
     console.print(table)
+
+    # Valuation Range (Phase A) — Fundamentals 가져와서 계산
+    vrange = _try_valuation_range(score)
+    if vrange is not None and not vrange.is_empty():
+        console.print(render_valuation_range(vrange))
+
     console.print(Panel(DISCLAIMER, title="면책", border_style="dim", padding=(0, 1)))
+
+
+def render_valuation_range(vrange: ValuationRange) -> Table:
+    """ValuationRange → rich.Table. 방법(PER/PBR/DIVIDEND)별 3 시나리오."""
+    from stock_compass.output.valuation_range import (
+        DISCLAIMER as VR_DISCLAIMER,
+    )
+
+    cur = vrange.current_price
+    cur_str = f" (현재 {cur:,.2f} {vrange.currency})" if cur else ""
+    table = Table(
+        title=f"Valuation Range — {vrange.ticker}{cur_str}",
+        caption=VR_DISCLAIMER,
+        caption_style="dim italic",
+        show_lines=False,
+    )
+    table.add_column("시나리오", style="cyan")
+    table.add_column("방법", style="magenta")
+    table.add_column("배수/yield", justify="right")
+    table.add_column("적정가", justify="right")
+    table.add_column("vs 현재", justify="right")
+    for p in vrange.points:
+        mul_str = (
+            f"{p.multiple * 100:.1f}%" if p.method == "DIVIDEND" else f"{p.multiple:.1f}x"
+        )
+        price_str = f"{p.fair_price:,.2f} {vrange.currency}"
+        if p.vs_current_pct is None:
+            vs_str = "—"
+        else:
+            sign = "+" if p.vs_current_pct >= 0 else ""
+            color = "green" if p.vs_current_pct >= 0 else "red"
+            vs_str = f"[{color}]{sign}{p.vs_current_pct:.1f}%[/{color}]"
+        table.add_row(p.scenario, p.method, mul_str, price_str, vs_str)
+    return table
+
+
+def _try_valuation_range(score: CompositeScore) -> ValuationRange | None:
+    """score → fundamentals 호출 → ValuationRange. 실패 시 None."""
+    try:
+        from stock_compass.markets import get_adapter
+        from stock_compass.output.valuation_range import compute_valuation_range
+
+        adapter = get_adapter(score.ticker, score.market)
+        fund = adapter.get_fundamentals(score.ticker)
+        return compute_valuation_range(fund, current_price=score.price_at_score)
+    except Exception:  # UI render는 score 출력 막지 않음
+        return None
 
 
 def _header_panel(score: CompositeScore) -> Panel:

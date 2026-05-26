@@ -20,7 +20,7 @@ from stock_compass.db import (
     record_token_usage,
     upsert_news_summary,
 )
-from stock_compass.markets.base import News
+from stock_compass.markets.base import Disclosure, News
 from stock_compass.utils.dates import to_iso_utc
 from stock_compass.utils.logging import get_logger
 
@@ -59,6 +59,52 @@ SYSTEM_PROMPT_NEWS = """당신은 한국·미국 주식 시장의 금융 뉴스 
   "summary": "한국어 3줄 요약",
   "tone_score": 0.0,
   "keywords": ["키워드1", "키워드2", "키워드3", "키워드4", "키워드5"]
+}"""
+
+
+SYSTEM_PROMPT_DISCLOSURE = """당신은 한국 DART 공시 분석가다.
+공시 제목과 보고 유형으로 시장 임팩트(tone_score: -10 ~ +10)를 정량화하라.
+
+이벤트 유형별 기본 가중치 (참고 기준 — 규모·맥락에 따라 조정):
+
+[긍정]
+- 자사주 매입 결정: +3 ~ +5
+- 자사주 소각: +5 ~ +7
+- 어닝 서프라이즈 / 잠정실적 양호: +4 ~ +8
+- 대규모 신규 계약 / 수주 공시: +3 ~ +6
+- 무상증자: +2 ~ +4
+- 배당 인상: +2 ~ +4
+- M&A / 전략적 제휴 (주주가치 증대): +2 ~ +5
+- 흑자 전환: +4 ~ +7
+
+[부정]
+- 회계 정정 (정정 보고서 포함): -5 ~ -8
+- 실적 어닝 미스 / 적자 확대: -4 ~ -7
+- 유상증자 (대규모 희석): -3 ~ -6
+- 무상감자: -6 ~ -9
+- CB·BW 발행: -2 ~ -4
+- 임원·대주주 자사주 매도: -2 ~ -4
+- 소송 패소 / 과징금: -3 ~ -6
+- 횡령·배임 사실 공시: -8 ~ -10
+- 거래정지 / 상장적격성 사유: -8 ~ -10
+
+[중립]
+- 분기·사업·반기보고서 정기 제출: 0
+- 정기주총 결의: 0
+- 단순 정정 (오기 정정): -1 ~ +1
+
+원칙:
+1. 제목+보고유형으로 이벤트 분류 → 위 범위 안에서 tone_score 결정
+2. 분류 불명·일반 공시는 0 (중립)
+3. summary는 한국어 3줄 이내. 원문 인용 금지
+4. JSON 한 객체만 출력. ``` 감싸기·인사말·주석 절대 금지
+
+출력 형식 (정확히 이 키만):
+{
+  "summary": "한국어 3줄 요약",
+  "event_type": "자사주매입 / 회계정정 / 실적공시 / 유상증자 / 기타",
+  "tone_score": 0.0,
+  "keywords": ["키워드1", "키워드2", "키워드3"]
 }"""
 
 
@@ -125,15 +171,17 @@ class ClaudeSummarizer:
             )
         return self._client
 
-    # ─── 단일 뉴스 요약 ───
+    # ─── 단일 요약 (뉴스 / 공시 공용) ───
 
-    def summarize_article(self, article_text: str) -> SummaryResult:
-        """원문 텍스트 → 요약. 한도 초과 시 SummaryLimitExceeded."""
-        truncated = article_text[:8000]  # 한 번에 처리할 안전 길이
+    def summarize_article(
+        self, article_text: str, *, system_prompt: str = SYSTEM_PROMPT_NEWS
+    ) -> SummaryResult:
+        """원문 텍스트 → 요약. system_prompt로 뉴스/공시 분기."""
+        truncated = article_text[:8000]
         response = self.client.messages.create(
             model=self.model,
             max_tokens=400,
-            system=SYSTEM_PROMPT_NEWS,
+            system=system_prompt,
             messages=[{"role": "user", "content": truncated}],
         )
         text = self._extract_text(response)
@@ -243,28 +291,200 @@ class ClaudeSummarizer:
             source=src,
         )
 
+    # ─── 통합 batch (뉴스 + 공시) ───
+
+    def summarize_events_batch(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        ticker_id: int,
+        news: list[News],
+        disclosures: list[Disclosure],
+    ) -> AggregatedSentiment:
+        """뉴스 + 공시 통합 sentiment.
+
+        공시는 이벤트성·확정성이 강하므로 가중치 2배. 캐시는 source_url 기준.
+        """
+        if not news and not disclosures:
+            return AggregatedSentiment(
+                score=50.0,
+                avg_tone=0.0,
+                count=0,
+                cached_count=0,
+                api_count=0,
+                fallback=True,
+                note="최근 30일 뉴스·공시 없음",
+                source="fallback",
+            )
+
+        weighted: list[tuple[float, float]] = []  # (tone, weight)
+        cached_count = 0
+        api_count = 0
+        disclosure_count = 0
+        budget_blown = False
+        limit_remaining = self._remaining_budget(conn)
+
+        # 뉴스 (weight 1.0)
+        for item in news[:10]:
+            tone, was_cached, used = self._process_event(
+                conn,
+                ticker_id=ticker_id,
+                source_url=item.url,
+                source_type="news",
+                published_at_iso=to_iso_utc(item.published_at),
+                build_text=lambda i=item: (
+                    f"제목: {i.title}\n출처: {i.source_name or '?'}\n"
+                    f"발행: {i.published_at}\n"
+                    f"요약(원문): {i.summary or i.title}"
+                ),
+                system_prompt=SYSTEM_PROMPT_NEWS,
+                budget_blown=budget_blown,
+                limit_remaining=limit_remaining,
+            )
+            if tone is None:
+                if not was_cached:
+                    budget_blown = True
+                continue
+            weighted.append((tone, 1.0))
+            if was_cached:
+                cached_count += 1
+            else:
+                api_count += 1
+                limit_remaining -= used
+
+        # 공시 (weight 2.0 — 이벤트 확정성)
+        for d in disclosures[:5]:
+            url = d.url or f"dart-rcept://{d.rcept_no}"
+            tone, was_cached, used = self._process_event(
+                conn,
+                ticker_id=ticker_id,
+                source_url=url,
+                source_type="disclosure",
+                published_at_iso=to_iso_utc(d.published_at),
+                build_text=lambda dd=d: (
+                    f"공시 제목: {dd.title}\n보고 유형: {dd.report_code or '?'}\n"
+                    f"공시번호: {dd.rcept_no}\n발행: {dd.published_at}"
+                ),
+                system_prompt=SYSTEM_PROMPT_DISCLOSURE,
+                budget_blown=budget_blown,
+                limit_remaining=limit_remaining,
+            )
+            if tone is None:
+                if not was_cached:
+                    budget_blown = True
+                continue
+            weighted.append((tone, 2.0))
+            disclosure_count += 1
+            if was_cached:
+                cached_count += 1
+            else:
+                api_count += 1
+                limit_remaining -= used
+
+        if not weighted:
+            return AggregatedSentiment(
+                score=50.0,
+                avg_tone=0.0,
+                count=0,
+                cached_count=cached_count,
+                api_count=api_count,
+                fallback=True,
+                note="요약 실패 또는 한도 초과",
+                source="fallback",
+            )
+
+        total_w = sum(w for _, w in weighted)
+        avg = sum(t * w for t, w in weighted) / total_w
+
+        if budget_blown and api_count == 0 and cached_count == 0:
+            src = "fallback"
+        elif api_count > 0:
+            src = "api"
+        else:
+            src = "cache"
+
+        return AggregatedSentiment(
+            score=round(tone_to_score(avg), 2),
+            avg_tone=round(avg, 2),
+            count=len(weighted),
+            cached_count=cached_count,
+            api_count=api_count,
+            fallback=budget_blown and api_count == 0,
+            note=(
+                f"뉴스+공시 {len(weighted)}건 (공시 {disclosure_count}건, w=2.0) "
+                f"가중평균 톤 {avg:+.1f} (API {api_count}/캐시 {cached_count})"
+            ),
+            source=src,
+        )
+
     # ─── 내부 ───
+
+    def _process_event(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        ticker_id: int,
+        source_url: str,
+        source_type: str,  # 'news' / 'disclosure'
+        published_at_iso: str,
+        build_text: Any,  # () -> str (lazy — 캐시 hit 시 호출 회피)
+        system_prompt: str,
+        budget_blown: bool,
+        limit_remaining: int,
+    ) -> tuple[float | None, bool, int]:
+        """단일 이벤트 처리 → (tone, was_cached, tokens_used).
+
+        tone=None은 스킵 (한도 초과·실패). was_cached는 budget 소모 여부 판단용.
+        """
+        cached = get_cached_news_summary(conn, ticker_id, source_url)
+        if cached is not None:
+            return (cached.tone_score, True, 0)
+
+        if budget_blown or limit_remaining <= 0:
+            return (None, False, 0)
+
+        try:
+            result = self.summarize_article(build_text(), system_prompt=system_prompt)
+        except (json.JSONDecodeError, ValueError) as e:
+            _logger.warning("요약 파싱 실패: %s — %s", source_url, e)
+            return (None, True, 0)  # 파싱 실패는 budget 무관
+        except Exception as e:
+            _logger.warning("Claude API 호출 실패: %s — %s", source_url, e)
+            return (None, False, 0)  # API 실패는 budget 소모로 간주
+
+        self._persist_summary(
+            conn,
+            ticker_id=ticker_id,
+            source_url=source_url,
+            source_type=source_type,
+            published_at_iso=published_at_iso,
+            result=result,
+        )
+        return (result.tone_score, False, result.tokens_used)
 
     def _remaining_budget(self, conn: sqlite3.Connection) -> int:
         usage = get_today_token_usage(conn, mode="api")
         used = int(usage["input_tokens"])
         return max(0, self.daily_input_limit - used)
 
-    def _persist(
+    def _persist_summary(
         self,
         conn: sqlite3.Connection,
+        *,
         ticker_id: int,
-        news: News,
+        source_url: str,
+        source_type: str,
+        published_at_iso: str,
         result: SummaryResult,
     ) -> None:
         upsert_news_summary(
             conn,
             NewsSummaryRow(
                 ticker_id=ticker_id,
-                source_url=news.url,
-                source_type="news",
+                source_url=source_url,
+                source_type=source_type,
                 source="api",
-                published_at=to_iso_utc(news.published_at),
+                published_at=published_at_iso,
                 summary=result.summary,
                 tone_score=result.tone_score,
                 keywords=result.keywords,
@@ -280,6 +500,23 @@ class ClaudeSummarizer:
             input_tokens=in_t,
             output_tokens=out_t,
             cost_usd=_estimate_cost(result.model, in_t, out_t),
+        )
+
+    def _persist(
+        self,
+        conn: sqlite3.Connection,
+        ticker_id: int,
+        news: News,
+        result: SummaryResult,
+    ) -> None:
+        """legacy — summarize_news_batch 호환용."""
+        self._persist_summary(
+            conn,
+            ticker_id=ticker_id,
+            source_url=news.url,
+            source_type="news",
+            published_at_iso=to_iso_utc(news.published_at),
+            result=result,
         )
 
     @staticmethod

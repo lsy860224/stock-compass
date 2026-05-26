@@ -197,6 +197,10 @@ class KrAdapter(MarketAdapter):
             profit_margin=_get(info, "profitMargins", as_=float),
             free_cash_flow=_get(info, "freeCashflow", as_=float),
             market_cap=_get(info, "marketCap", as_=float),
+            trailing_eps=_get(info, "trailingEps", as_=float),
+            forward_eps=_get(info, "forwardEps", as_=float),
+            book_value=_get(info, "bookValue", as_=float),
+            dividend_per_share=_get(info, "dividendRate", as_=float),
             source="yfinance+pykrx" if (per or pbr) else "yfinance",
         )
 

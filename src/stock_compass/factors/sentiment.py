@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from stock_compass.config import settings
-from stock_compass.factors.base import DEFAULT_WEIGHTS, FactorScore, neutral
+from stock_compass.factors.base import DEFAULT_WEIGHTS, FactorScore
 from stock_compass.markets.base import MarketAdapter
 from stock_compass.utils.logging import get_logger
 
@@ -53,15 +53,21 @@ def _api_path(adapter: MarketAdapter, ticker: str) -> FactorScore:
         news = adapter.get_news(ticker, days=30)
     except Exception as e:
         _logger.warning("sentiment: 뉴스 조회 실패 — %s (%s)", ticker, e)
-        return neutral("sentiment", f"뉴스 조회 실패: {e}", raw={"ticker": ticker})
+        news = []
 
-    if not news:
+    try:
+        disclosures = adapter.get_disclosures(ticker, days=30)
+    except Exception as e:
+        _logger.warning("sentiment: 공시 조회 실패 — %s (%s)", ticker, e)
+        disclosures = []
+
+    if not news and not disclosures:
         return FactorScore(
             name="sentiment",
             score=50.0,
             weight=DEFAULT_WEIGHTS["sentiment"],
-            raw_values={"news_count": 0},
-            note="최근 30일 뉴스 없음",
+            raw_values={"news_count": 0, "disclosure_count": 0},
+            note="최근 30일 뉴스·공시 없음",
             source="fallback",
         )
 
@@ -76,8 +82,11 @@ def _api_path(adapter: MarketAdapter, ticker: str) -> FactorScore:
             currency=adapter.get_currency(),
             yfinance_symbol=yf_sym,
         )
-        result = summarizer.summarize_news_batch(
-            conn, ticker_id=ticker_id, news=news[:10]
+        result = summarizer.summarize_events_batch(
+            conn,
+            ticker_id=ticker_id,
+            news=news,
+            disclosures=disclosures,
         )
 
     return FactorScore(
@@ -85,7 +94,8 @@ def _api_path(adapter: MarketAdapter, ticker: str) -> FactorScore:
         score=result.score,
         weight=DEFAULT_WEIGHTS["sentiment"],
         raw_values={
-            "news_count": result.count,
+            "news_count": len(news),
+            "disclosure_count": len(disclosures),
             "avg_tone": result.avg_tone,
             "api_calls": result.api_count,
             "cached": result.cached_count,

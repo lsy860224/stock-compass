@@ -52,6 +52,11 @@ class Fundamentals(BaseModel):
     profit_margin: float | None = None
     free_cash_flow: float | None = None
     market_cap: float | None = None
+    # Valuation Range용 (Phase A)
+    trailing_eps: float | None = None
+    forward_eps: float | None = None
+    book_value: float | None = None  # BPS
+    dividend_per_share: float | None = None
     source: str = "yfinance"
 
 

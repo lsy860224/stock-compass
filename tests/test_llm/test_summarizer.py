@@ -24,7 +24,7 @@ from stock_compass.llm.summarizer import (
     _estimate_cost,
     tone_to_score,
 )
-from stock_compass.markets.base import News
+from stock_compass.markets.base import Disclosure, News
 
 
 @dataclass
@@ -227,6 +227,139 @@ class TestSummarizeBatch:
         assert agg.api_count == 1
         # 평균: (8 + -2)/2 = 3 → tone_to_score(3) = 65
         assert agg.avg_tone == 3.0
+
+
+def _mk_disclosure(
+    rcept_no: str = "20260101000001", title: str = "자기주식 취득 결정"
+) -> Disclosure:
+    return Disclosure(
+        rcept_no=rcept_no,
+        title=title,
+        published_at=datetime.now(UTC) - timedelta(hours=1),
+        report_code="A001",
+        url=f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}",
+    )
+
+
+class TestSummarizeEventsBatch:
+    def test_empty_inputs_returns_fallback(
+        self, conn: sqlite3.Connection, ticker_id: int
+    ) -> None:
+        s = ClaudeSummarizer(model="test", client=_MockAnthropicClient([]))
+        agg = s.summarize_events_batch(
+            conn, ticker_id=ticker_id, news=[], disclosures=[]
+        )
+        assert agg.score == 50.0
+        assert agg.source == "fallback"
+        assert agg.count == 0
+
+    def test_news_only_weights_1x(
+        self, conn: sqlite3.Connection, ticker_id: int
+    ) -> None:
+        mock = _MockAnthropicClient(
+            [{"summary": "x", "tone_score": 4.0, "keywords": []}]
+        )
+        s = ClaudeSummarizer(model="test", client=mock, daily_input_limit=10_000)
+        agg = s.summarize_events_batch(
+            conn, ticker_id=ticker_id, news=[_mk_news("https://e.com/n1")], disclosures=[]
+        )
+        assert agg.api_count == 1
+        # 단일 뉴스 weight 1x → avg = 4.0
+        assert agg.avg_tone == 4.0
+
+    def test_disclosure_weight_2x_dominates_average(
+        self, conn: sqlite3.Connection, ticker_id: int
+    ) -> None:
+        """뉴스 -2 (w=1) + 공시 +6 (w=2) → (-2 + 12)/3 = 3.33."""
+        mock = _MockAnthropicClient(
+            [
+                {"summary": "n", "tone_score": -2.0, "keywords": []},
+                {
+                    "summary": "d",
+                    "event_type": "자사주매입",
+                    "tone_score": 6.0,
+                    "keywords": [],
+                },
+            ]
+        )
+        s = ClaudeSummarizer(model="test", client=mock, daily_input_limit=10_000)
+        agg = s.summarize_events_batch(
+            conn,
+            ticker_id=ticker_id,
+            news=[_mk_news("https://e.com/n2")],
+            disclosures=[_mk_disclosure("20260201000001")],
+        )
+        assert agg.api_count == 2
+        assert agg.avg_tone == pytest.approx((-2.0 + 6.0 * 2) / 3.0, abs=0.01)
+        assert "공시 1건" in agg.note
+
+    def test_disclosure_cache_hit_skips_api(
+        self, conn: sqlite3.Connection, ticker_id: int
+    ) -> None:
+        """공시 URL이 캐시에 있으면 재호출 X."""
+        d = _mk_disclosure("20260301000001", "회계 정정 보고서")
+        upsert_news_summary(
+            conn,
+            NewsSummaryRow(
+                ticker_id=ticker_id,
+                source_url=d.url or "",
+                source_type="disclosure",
+                source="api",
+                published_at=datetime.now(UTC).isoformat(),
+                summary="정정 공시",
+                tone_score=-7.0,
+                keywords=[],
+                model="test",
+            ),
+        )
+        mock = _MockAnthropicClient([])
+        s = ClaudeSummarizer(model="test", client=mock, daily_input_limit=10_000)
+        agg = s.summarize_events_batch(
+            conn, ticker_id=ticker_id, news=[], disclosures=[d]
+        )
+        assert agg.cached_count == 1
+        assert agg.api_count == 0
+        assert agg.avg_tone == -7.0
+        assert agg.source == "cache"
+
+    def test_disclosure_persists_with_source_type(
+        self, conn: sqlite3.Connection, ticker_id: int
+    ) -> None:
+        mock = _MockAnthropicClient(
+            [{"summary": "d", "tone_score": 5.0, "keywords": []}]
+        )
+        s = ClaudeSummarizer(model="test", client=mock, daily_input_limit=10_000)
+        d = _mk_disclosure("20260401000001")
+        s.summarize_events_batch(
+            conn, ticker_id=ticker_id, news=[], disclosures=[d]
+        )
+        # DB에 source_type='disclosure'로 저장됐는지
+        row = conn.execute(
+            "SELECT source_type FROM news_summaries WHERE source_url = ?",
+            (d.url,),
+        ).fetchone()
+        assert row is not None
+        assert row["source_type"] == "disclosure"
+
+    def test_budget_blown_partway_through(
+        self, conn: sqlite3.Connection, ticker_id: int
+    ) -> None:
+        """첫 호출이 한도를 소진하면 다음 호출은 건너뛰지만 첫 결과는 유지."""
+        mock = _MockAnthropicClient(
+            [{"summary": "ok", "tone_score": 3.0, "keywords": []}]
+        )
+        # 1회 호출분만 허용 (test 모의는 200 토큰 사용)
+        s = ClaudeSummarizer(model="test", client=mock, daily_input_limit=150)
+        agg = s.summarize_events_batch(
+            conn,
+            ticker_id=ticker_id,
+            news=[_mk_news("https://e.com/x1"), _mk_news("https://e.com/x2")],
+            disclosures=[],
+        )
+        assert agg.api_count == 1
+        assert agg.count == 1
+        # 한도 소진해도 처리한 1건은 유효 (fallback 아님)
+        assert agg.source == "api"
 
 
 class TestPricing:
