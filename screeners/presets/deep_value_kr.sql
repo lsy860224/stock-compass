@@ -15,7 +15,7 @@ SELECT
   verdict
 FROM v_latest_scores
 WHERE market = 'KR'
-  AND universes LIKE '%KOSPI_200%' OR universes LIKE '%KOSDAQ_150%'
+  AND (universes LIKE '%KOSPI_200%' OR universes LIKE '%KOSDAQ_150%')
   AND per BETWEEN 3 AND 12
   AND pbr <= 1.2
   AND roe >= 0.05

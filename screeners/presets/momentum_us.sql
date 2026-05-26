@@ -13,7 +13,7 @@ SELECT
   ROUND(composite_score, 1) AS score
 FROM v_latest_scores
 WHERE market = 'US'
-  AND universes LIKE '%SP500%' OR universes LIKE '%NASDAQ_100%'
+  AND (universes LIKE '%SP500%' OR universes LIKE '%NASDAQ_100%')
   AND ma200_distance BETWEEN 0.05 AND 0.30      -- 5~30% 위
   AND volume_zscore >= 1.0                       -- 평균 이상 거래량
   AND rsi_14 BETWEEN 50 AND 70                   -- 과매수 제외
