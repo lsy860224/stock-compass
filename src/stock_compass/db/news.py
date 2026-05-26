@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date as date_cls
 
 from stock_compass.utils.dates import today_kst
@@ -23,6 +23,7 @@ class NewsSummaryRow:
     model: str
     batch_id: str | None = None
     tokens_used: int | None = None
+    concerns: list[str] = field(default_factory=list)
 
 
 def upsert_news_summary(conn: sqlite3.Connection, row: NewsSummaryRow) -> None:
@@ -31,8 +32,8 @@ def upsert_news_summary(conn: sqlite3.Connection, row: NewsSummaryRow) -> None:
         """
         INSERT INTO news_summaries
           (ticker_id, source_url, source_type, source, published_at,
-           summary, tone_score, keywords, tokens_used, model, batch_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           summary, tone_score, keywords, tokens_used, model, batch_id, concerns)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ticker_id, source_url) DO UPDATE SET
           summary = excluded.summary,
           tone_score = excluded.tone_score,
@@ -40,7 +41,8 @@ def upsert_news_summary(conn: sqlite3.Connection, row: NewsSummaryRow) -> None:
           tokens_used = COALESCE(excluded.tokens_used, news_summaries.tokens_used),
           model = excluded.model,
           source = excluded.source,
-          batch_id = COALESCE(excluded.batch_id, news_summaries.batch_id)
+          batch_id = COALESCE(excluded.batch_id, news_summaries.batch_id),
+          concerns = excluded.concerns
         """,
         (
             row.ticker_id,
@@ -54,6 +56,7 @@ def upsert_news_summary(conn: sqlite3.Connection, row: NewsSummaryRow) -> None:
             row.tokens_used,
             row.model,
             row.batch_id,
+            json.dumps(row.concerns, ensure_ascii=False),
         ),
     )
 
@@ -64,7 +67,7 @@ def get_cached_news_summary(
     row = conn.execute(
         """
         SELECT ticker_id, source_url, source_type, source, published_at,
-               summary, tone_score, keywords, tokens_used, model, batch_id
+               summary, tone_score, keywords, tokens_used, model, batch_id, concerns
         FROM news_summaries
         WHERE ticker_id = ? AND source_url = ?
         """,
@@ -79,7 +82,7 @@ def get_recent_news_summaries(
     rows = conn.execute(
         """
         SELECT ticker_id, source_url, source_type, source, published_at,
-               summary, tone_score, keywords, tokens_used, model, batch_id
+               summary, tone_score, keywords, tokens_used, model, batch_id, concerns
         FROM news_summaries
         WHERE ticker_id = ?
           AND published_at >= datetime('now', ?)
@@ -92,6 +95,8 @@ def get_recent_news_summaries(
 
 def _row_to_news_summary(row: sqlite3.Row) -> NewsSummaryRow:
     keywords = json.loads(row["keywords"]) if row["keywords"] else []
+    # SELECT가 항상 concerns 칼럼을 명시하므로 Row에 존재 — 빈 문자열/NULL은 빈 배열
+    concerns = json.loads(row["concerns"]) if row["concerns"] else []
     return NewsSummaryRow(
         ticker_id=int(row["ticker_id"]),
         source_url=row["source_url"],
@@ -104,6 +109,7 @@ def _row_to_news_summary(row: sqlite3.Row) -> NewsSummaryRow:
         model=row["model"],
         batch_id=row["batch_id"],
         tokens_used=int(row["tokens_used"]) if row["tokens_used"] is not None else None,
+        concerns=concerns,
     )
 
 

@@ -141,6 +141,7 @@ def import_response(
                 keywords=item.keywords,
                 model="manual_claude_ai",
                 batch_id=payload.batch_id,
+                concerns=item.concerns,
             ),
         )
         result.saved += 1
