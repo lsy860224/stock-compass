@@ -2,6 +2,9 @@
 
 `subprocess.run`으로 osascript 호출 — 외부 의존성 없음, 단 macOS 한정.
 타 OS에서는 stdout 폴백 + 경고 로그.
+
+CLAUDE.md 1) "모든 출력에 면책 자동 삽입" — subtitle 미지정 시 자동으로
+"참고용 — 투자 자문 아님" 부여. 호출자가 명시한 subtitle은 그대로 존중.
 """
 
 from __future__ import annotations
@@ -17,6 +20,9 @@ _logger = get_logger(__name__)
 # AppleScript에서 escape 필요한 문자
 _ESCAPE_MAP = str.maketrans({'"': '\\"', "\\": "\\\\", "\n": " "})
 
+# 알림에 자동 부여되는 면책 부제목 (CLAUDE.md 1절 절대 원칙)
+_DEFAULT_DISCLAIMER_SUBTITLE = "참고용 — 투자 자문 아님"
+
 
 def macos_notify(
     *,
@@ -24,7 +30,12 @@ def macos_notify(
     body: str,
     subtitle: str | None = None,
 ) -> bool:
-    """macOS 알림센터로 발화. 성공 시 True, 실패·미지원 시 False."""
+    """macOS 알림센터로 발화. 성공 시 True, 실패·미지원 시 False.
+
+    subtitle 미지정 시 면책 부제목을 자동 부여 (CLAUDE.md 1절 원칙).
+    """
+    effective_subtitle = subtitle if subtitle is not None else _DEFAULT_DISCLAIMER_SUBTITLE
+
     if sys.platform != "darwin":
         _logger.warning("[notify-stub] %s — %s", title, body)
         return False
@@ -35,9 +46,8 @@ def macos_notify(
     script_parts = [
         f'display notification "{_esc(body)}"',
         f'with title "{_esc(title)}"',
+        f'subtitle "{_esc(effective_subtitle)}"',
     ]
-    if subtitle:
-        script_parts.append(f'subtitle "{_esc(subtitle)}"')
     script = " ".join(script_parts)
 
     try:

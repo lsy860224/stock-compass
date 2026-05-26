@@ -190,6 +190,8 @@ class ScreenerEngine:
 
         price 컬럼 자동 탐지: `price`, `price_krw`, `price_usd` 중 첫 매치 사용.
         market 컬럼이 base에 없으면 `--budget-market` 무시 (안전 fallback).
+        base SQL이 ORDER BY 를 가져도 outer SELECT는 정보를 잃으므로 outer에
+        `ORDER BY composite_score DESC NULLS LAST` 부착 (있을 때만).
         """
         _ = budget  # SQL 바인딩으로만 전달
         clean = sql.rstrip().rstrip(";").rstrip()
@@ -212,11 +214,17 @@ class ScreenerEngine:
         market_clause = (
             " AND market = :__bm" if market is not None and has_market else ""
         )
+        order_clause = (
+            "\nORDER BY composite_score DESC NULLS LAST"
+            if "composite_score" in base_columns
+            else ""
+        )
         return (
             f"WITH __base AS (\n{clean}\n)\n"
             f"SELECT * FROM __base "
             f"WHERE {price_col} IS NOT NULL AND {price_col} <= :__budget"
             f"{market_clause}"
+            f"{order_clause}"
         )
 
     def _probe_columns(self, base_sql: str) -> set[str]:

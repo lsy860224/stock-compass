@@ -112,6 +112,13 @@ class KrAdapter(MarketAdapter):
         if df is None:
             df = self._fetch_history_yf(symbol, period)
             source = "yfinance"
+            # KOSPI 명시 아니고 .KS 빈 결과면 KOSDAQ(.KQ) 시도 — pykrx 정전 시 fallback
+            if df.empty and symbol.endswith(".KS") and not is_kospi(code):
+                alt = f"{code}.KQ"
+                _logger.info("yfinance %s 빈 결과 → %s 시도", symbol, alt)
+                df = self._fetch_history_yf(alt, period)
+                if not df.empty:
+                    source = "yfinance(.KQ)"
             if df.empty:
                 _logger.info("yfinance KR 빈 결과 → pykrx fallback: %s", code)
                 df = self._fetch_history_pykrx(code, period)
@@ -167,6 +174,11 @@ class KrAdapter(MarketAdapter):
         info: dict[str, Any] | None = load_json(cache_name, _INFO_TTL)
         if info is None:
             info = UsAdapter()._fetch_info(symbol)
+            # KOSPI 명시 아니고 빈 info면 KOSDAQ(.KQ) 시도
+            if not info and symbol.endswith(".KS") and not is_kospi(code):
+                alt = f"{code}.KQ"
+                _logger.info("yfinance info %s 빈 → %s 시도", symbol, alt)
+                info = UsAdapter()._fetch_info(alt)
             if info:
                 save_json(cache_name, info)
         info = info or {}
