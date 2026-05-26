@@ -96,6 +96,29 @@ class CraftClient:
         data = self._request("POST", "/blocks", json=payload)
         return list(data.get("items") or [])
 
+    # ─── public — 이미지 업로드 ───
+
+    def upload_image(
+        self,
+        *,
+        document_id: str,
+        image_bytes: bytes,
+        content_type: str = "image/png",
+    ) -> dict[str, Any]:
+        """POST /upload?position=end&pageId=... — 문서 끝에 이미지 블록 추가.
+
+        body는 raw octet-stream. Response: {"blockId", "assetUrl"}.
+        """
+        if not image_bytes:
+            raise CraftAPIError("upload_image: 빈 image_bytes")
+        return self._request(
+            "POST",
+            "/upload",
+            params={"position": "end", "pageId": document_id},
+            content=image_bytes,
+            headers={"Content-Type": content_type},
+        )
+
     # ─── 내부 ───
 
     def _request(

@@ -354,18 +354,48 @@ def report(
                 console.print("[yellow]`open` 명령 미지원 (macOS 외부 환경).[/yellow]")
 
     if publish:
+        # 관심권 종목 30일 추이 차트 자동 첨부 (CraftPublisher.charts 인자)
+        charts = _build_interest_charts(scores)
         try:
             publisher = CraftPublisher()
-            result = publisher.publish_daily_note(content, on_date)
+            result = publisher.publish_daily_note(content, on_date, charts=charts)
             action = "갱신" if result.is_update else "발행"
+            chart_note = f" + 차트 {len(charts)}개" if charts else ""
             console.print(
                 f"[green]✓ Craft {action}:[/green] [cyan]{result.url}[/cyan]"
-                f" (note_id={result.note_id})"
+                f" (note_id={result.note_id}{chart_note})"
             )
         except CraftAuthError as e:
             console.print(f"[yellow]Craft 인증 실패: {e}[/yellow]")
         except CraftAPIError as e:
             console.print(f"[red]Craft API 오류: {e}[/red]")
+
+
+def _build_interest_charts(
+    scores: list[CompositeScore],
+) -> list[tuple[str, bytes]]:
+    """관심권(>=70) 종목 한정 30일 추이 차트. 데이터 부족 종목은 자동 스킵."""
+    from stock_compass.db import get_db_connection, get_score_history
+    from stock_compass.output.chart import render_score_history_chart
+
+    interest = [s for s in scores if s.verdict == "관심권"]
+    if not interest:
+        return []
+
+    out: list[tuple[str, bytes]] = []
+    with get_db_connection() as conn:
+        for s in interest:
+            history = get_score_history(conn, s.ticker, s.market, days=30)
+            png = render_score_history_chart(
+                history, ticker=s.ticker, name=s.name
+            )
+            if png is None:
+                continue
+            caption = (
+                f"{s.name} ({s.ticker})" if s.name else s.ticker
+            ) + f" — 현재 {s.total_score:.1f}점"
+            out.append((caption, png))
+    return out
 
 
 @sentiment_app.command("prompt")
@@ -1000,6 +1030,161 @@ def discover(
         _publish_discover_to_craft(scores, preset_name=preset)
 
 
+@app.command("weekly-discover")
+def weekly_discover(
+    publish_craft: Annotated[
+        bool, typer.Option("--publish-craft", help="결과를 Craft에 통합 노트로 발행")
+    ] = True,
+    presets: Annotated[
+        str,
+        typer.Option(
+            "--presets",
+            help=(
+                "실행할 preset 쉼표 구분 "
+                "(기본: value_growth_kr,momentum_us,oversold_quality_global)"
+            ),
+        ),
+    ] = "value_growth_kr,momentum_us,oversold_quality_global",
+    refresh_universe: Annotated[
+        bool,
+        typer.Option(
+            "--refresh-universe/--no-refresh-universe",
+            help="실행 전 KOSPI_200 + SP500 universe 갱신",
+        ),
+    ] = True,
+    limit_per_preset: Annotated[
+        int, typer.Option("--limit", help="preset당 결과 행 수 (기본 15)")
+    ] = 15,
+) -> None:
+    """주간 종목 발굴 — 3개 preset 실행 + 통합 Craft 노트.
+
+    토요일 아침 launchd가 호출하는 일괄 발굴 흐름. 각 preset 결과는
+    한 Craft 노트의 별도 섹션으로 묶임.
+    """
+    from datetime import datetime as datetime_cls
+
+    from stock_compass.config import settings
+    from stock_compass.db import get_db_connection
+    from stock_compass.output.craft import (
+        CraftAPIError,
+        CraftAuthError,
+        CraftPublisher,
+    )
+    from stock_compass.screener import (
+        PresetNotFoundError,
+        ScreenerEngine,
+        ScreenerError,
+        list_presets,
+        load_preset,
+    )
+    from stock_compass.screener.universes import (
+        UniverseFetchError,
+        refresh,
+    )
+    from stock_compass.utils.dates import today_kst
+    from stock_compass.utils.logging import setup_logging
+
+    setup_logging(settings.log_dir)
+
+    requested_names = [p.strip() for p in presets.split(",") if p.strip()]
+    available = {p.name for p in list_presets()}
+    unknown = [n for n in requested_names if n not in available]
+    if unknown:
+        console.print(f"[red]존재하지 않는 preset: {unknown}[/red]")
+        raise typer.Exit(code=2)
+
+    # 1) universe 갱신 (실패해도 진행 — 기존 멤버 사용)
+    if refresh_universe:
+        with get_db_connection() as conn:
+            for code in ("KOSPI_200", "SP500"):
+                try:
+                    r = refresh(conn, code)
+                    console.print(
+                        f"[dim]universe {r.universe_code}: +{r.members} 신규[/dim]"
+                    )
+                except UniverseFetchError as e:
+                    console.print(f"[yellow]universe {code} 갱신 실패: {e}[/yellow]")
+
+    # 2) 각 preset 실행 + 결과 누적
+    engine = ScreenerEngine()
+    sections: list[str] = [
+        f"# 주간 발굴 · {today_kst().isoformat()} (토요일 KST)",
+        "",
+        "> 매주 자동 발굴된 후보 종목 — **매수 권유 아님.** 본인 추가 조사 필수.",
+    ]
+    total_found = 0
+    for name in requested_names:
+        try:
+            sql = load_preset(name)
+            result = engine.run_sql(
+                sql,
+                limit=limit_per_preset,
+                preset_name=f"weekly:{name}",
+            )
+        except (PresetNotFoundError, ScreenerError) as e:
+            console.print(f"[red]preset {name} 실패: {e}[/red]")
+            sections.append(f"\n## ❌ {name}\n\n실행 실패: {e}")
+            continue
+
+        total_found += result.row_count
+        sections.append(f"\n## 🔍 {name} — {result.row_count}건")
+        if not result.rows:
+            sections.append("\n조건 충족 종목 없음.")
+            continue
+        # 마크다운 표 (앞 6컬럼만)
+        cols = result.columns[:6]
+        sections.append("\n| " + " | ".join(cols) + " |")
+        sections.append("|" + "|".join(["---"] * len(cols)) + "|")
+        for row in result.rows[:15]:
+            cells = [_format_md_cell(row.get(c)) for c in cols]
+            sections.append("| " + " | ".join(cells) + " |")
+        sections.append(
+            f"\n_(전체 {result.row_count}건, 표시 상위 {min(15, result.row_count)}건)_"
+        )
+
+    sections.append(
+        "\n---\n\n> 면책: 결과는 매수 권유 아님. 거래비용·세금·survivorship bias 미반영."
+    )
+    body = "\n".join(sections)
+
+    console.print(
+        f"\n[cyan]주간 발굴 완료[/cyan] — {len(requested_names)}개 preset, "
+        f"총 {total_found}건"
+    )
+
+    # 3) Craft 발행
+    if publish_craft:
+        if settings.craft_api_token is None:
+            console.print("[yellow]CRAFT_API_TOKEN 미설정 — 발행 생략[/yellow]")
+            return
+        try:
+            publisher = CraftPublisher()
+            publish_result = publisher.publish_daily_note(
+                body,
+                today_kst(),
+                note_kind="weekly-discover",
+                title=f"주간 발굴 · {today_kst().isoformat()}",
+            )
+            action = "갱신" if publish_result.is_update else "발행"
+            console.print(
+                f"[green]✓ Craft {action}:[/green] [cyan]{publish_result.url}[/cyan]"
+            )
+        except CraftAuthError as e:
+            console.print(f"[yellow]Craft 인증 실패: {e}[/yellow]")
+        except CraftAPIError as e:
+            console.print(f"[red]Craft API 오류: {e}[/red]")
+    _ = datetime_cls
+
+
+def _format_md_cell(v: object) -> str:
+    if v is None:
+        return "—"
+    if isinstance(v, float):
+        return f"{v:,.2f}" if abs(v) >= 1 else f"{v:.4f}"
+    s = str(v)
+    return s.replace("|", "/").replace("\n", " ")
+
+
 def _screener_rows_to_targets(
     rows: list[dict[str, Any]],
     *,
@@ -1259,13 +1444,28 @@ def _resolve_targets(
     return out
 
 
-def _resolve_task(task: str, hour: int) -> str:
-    """`auto` 입력을 KST 시각 기반 us/kr/daily/all로 변환."""
+def _resolve_task(task: str, hour: int, *, weekday: int | None = None) -> str:
+    """`auto` 입력을 KST 시각 + 요일 기반 task로 변환.
+
+    Args:
+        weekday: Python weekday (Mon=0, Sun=6). 미지정 시 현재 KST.
+
+    Returns: us/kr/daily/all/weekly
+    """
     t = task.lower()
-    if t in ("us", "kr", "daily", "all"):
+    if t in ("us", "kr", "daily", "all", "weekly"):
         return t
     if t != "auto":
-        raise typer.BadParameter(f"--task는 auto/us/kr/daily/all 중 하나: {task!r}")
+        raise typer.BadParameter(
+            f"--task는 auto/us/kr/daily/all/weekly 중 하나: {task!r}"
+        )
+    if weekday is None:
+        from stock_compass.utils.dates import now_kst
+
+        weekday = now_kst().weekday()
+    # 토요일(5) 08:00 → 주간 발굴 (plist Weekday=7, Hour=8)
+    if weekday == 5 and hour == 8:
+        return "weekly"
     # 시각 분기 — plist (06:30 / 07:00 / 16:30) 매칭, ±1h 관용
     if hour == 7:
         return "daily"
@@ -1296,6 +1496,18 @@ def _run_scheduled_task(task: str, *, dry_run: bool) -> int:
     from stock_compass.utils.dates import today_kst
 
     exit_code = 0
+
+    # 주간 발굴 — 별도 흐름 (alert 안 함, batch 안 함)
+    if task == "weekly":
+        import subprocess
+        import sys
+
+        cmd = [sys.executable, "-m", "stock_compass", "weekly-discover"]
+        if dry_run:
+            console.print(f"[dim]dry-run: {' '.join(cmd)}[/dim]")
+            return 0
+        result = subprocess.run(cmd, check=False)
+        return result.returncode
 
     if task in ("us", "kr", "all"):
         forced: Market | None = (
