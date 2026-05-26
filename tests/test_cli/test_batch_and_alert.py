@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from stock_compass.cli import _resolve_task
+from stock_compass.commands.scoring import resolve_task as _resolve_task
 
 # Mon=0 ... Fri=4, Sat=5, Sun=6
 MON = 0

@@ -6,7 +6,9 @@ from typing import Any
 
 import pytest
 
-from stock_compass.cli import _screener_rows_to_targets
+from stock_compass.commands.screener import (
+    screener_rows_to_targets as _screener_rows_to_targets,
+)
 
 
 class TestScreenerRowsToTargets:
