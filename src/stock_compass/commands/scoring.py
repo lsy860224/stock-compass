@@ -9,6 +9,7 @@ import typer
 from stock_compass.commands._app import app, console
 from stock_compass.commands._helpers import parse_market, resolve_targets, run_mixed
 from stock_compass.markets.base import Market
+from stock_compass.output.craft_exporter import PreviousScores, SectorRanks
 
 
 @app.command()
@@ -20,6 +21,11 @@ def score(
 ) -> None:
     """단일 종목의 5팩터 점수 + 종합 점수 출력."""
     from stock_compass.config import settings
+    from stock_compass.db import (
+        get_db_connection,
+        get_sector_score_rank,
+        get_ticker_id,
+    )
     from stock_compass.output.terminal import render_single_score
     from stock_compass.scoring import ScoringEngine
     from stock_compass.utils.logging import setup_logging
@@ -34,7 +40,16 @@ def score(
             console.print(f"[red]{e}[/red]")
             raise typer.Exit(code=1) from e
 
-    render_single_score(result, console=console)
+    sector_rank: tuple[int, int] | None = None
+    if result.sector:
+        with get_db_connection() as conn:
+            tid = get_ticker_id(conn, result.ticker, result.market)
+            if tid is not None:
+                sector_rank = get_sector_score_rank(
+                    conn, result.market, result.sector, tid
+                )
+
+    render_single_score(result, console=console, sector_rank=sector_rank)
 
 
 @app.command()
@@ -93,7 +108,8 @@ def batch(
     ) as progress:
         results = run_mixed(engine, just_tickers, market_for, progress, persist=not no_persist)
 
-    render_score_ranking(results, console=console)
+    previous = _previous_scores_for(results)
+    render_score_ranking(results, console=console, previous_scores=previous)
 
 
 @app.command()
@@ -260,7 +276,10 @@ def _run_scheduled_task(task: str, *, dry_run: bool) -> int:
         if len(results) < len(targets):
             exit_code = 1
         if results:
-            render_score_ranking(results, console=console)
+            previous = _previous_scores_for(results)
+            render_score_ranking(
+                results, console=console, previous_scores=previous
+            )
 
     manager = default_manager()
     with get_db_connection() as conn:
@@ -274,13 +293,60 @@ def _run_scheduled_task(task: str, *, dry_run: bool) -> int:
 
     if task in ("daily", "all"):
         with get_db_connection() as conn:
-            from stock_compass.db import get_scores_on_date
+            from stock_compass.db import (
+                get_previous_total_scores,
+                get_scores_on_date,
+                get_sector_score_rank,
+                get_ticker_id,
+                get_today_token_usage,
+            )
 
-            scores = get_scores_on_date(conn, today_kst())
+            on_date = today_kst()
+            scores = get_scores_on_date(conn, on_date)
+            previous = get_previous_total_scores(
+                conn,
+                [(s.ticker, s.market) for s in scores],
+                before_date=on_date,
+            )
+            sector_ranks: SectorRanks = {}
+            for s in scores:
+                if s.sector:
+                    tid = get_ticker_id(conn, s.ticker, s.market)
+                    if tid is not None:
+                        r = get_sector_score_rank(
+                            conn, s.market, s.sector, tid
+                        )
+                        if r is not None:
+                            sector_ranks[(s.ticker, s.market)] = r
+            token_usage = get_today_token_usage(conn, mode="api", on_date=on_date)
         if scores and not dry_run:
-            path = CraftExporter().export(scores, today_kst())
+            path = CraftExporter().export(
+                scores,
+                on_date,
+                previous_scores=previous,
+                sector_ranks=sector_ranks,
+                token_usage=token_usage,
+            )
             console.print(f"[green]✓[/green] Craft 노트: [cyan]{path}[/cyan]")
         elif not scores:
             console.print("[yellow]오늘 스냅샷 없음 — Craft 노트 생략[/yellow]")
 
     return exit_code
+
+
+def _previous_scores_for(
+    results: list,  # type: ignore[type-arg]
+) -> PreviousScores:
+    """batch 결과 종목들의 직전 (어제 또는 이전) total_score + verdict 조회.
+
+    DB 미등록·이력 없는 종목은 결과 dict에 미포함 → render에서 '—' 표시.
+    """
+    if not results:
+        return {}
+    from stock_compass.db import get_db_connection, get_previous_total_scores
+    from stock_compass.utils.dates import today_kst
+
+    code_markets = [(r.ticker, r.market) for r in results]
+    on_date = today_kst()
+    with get_db_connection() as conn:
+        return get_previous_total_scores(conn, code_markets, before_date=on_date)
