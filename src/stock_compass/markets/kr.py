@@ -300,6 +300,8 @@ class KrAdapter(MarketAdapter):
             return []
         if df is None or df.empty:
             return []
+        from stock_compass.utils.disclosure_classifier import classify
+
         out: list[Disclosure] = []
         for _, row in df.iterrows():
             try:
@@ -308,13 +310,16 @@ class KrAdapter(MarketAdapter):
                 )
             except ValueError:
                 continue
+            title = str(row.get("report_nm", ""))
+            report_code = str(row.get("pblntf_ty", "")) or None
             out.append(
                 Disclosure(
                     rcept_no=str(row.get("rcept_no", "")),
-                    title=str(row.get("report_nm", "")),
+                    title=title,
                     published_at=published,
-                    report_code=str(row.get("pblntf_ty", "")) or None,
+                    report_code=report_code,
                     url=f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={row.get('rcept_no')}",
+                    kind=classify(title, report_code),
                 )
             )
         return out
