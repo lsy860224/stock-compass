@@ -69,13 +69,18 @@ class News(BaseModel):
 
 
 class Disclosure(BaseModel):
-    """DART 한국 공시 (US는 사용 X)."""
+    """DART 한국 공시 (US는 사용 X).
+
+    `kind`는 `utils.disclosure_classifier.classify()` 결과 — regex 기반
+    이벤트 유형. 분류 안 되면 'OTHER'. summarizer가 LLM prompt에 메타로 추가.
+    """
 
     rcept_no: str
     title: str
     published_at: datetime
     report_code: str | None = None
     url: str | None = None
+    kind: str = "OTHER"
 
 
 class MarketAdapter(ABC):

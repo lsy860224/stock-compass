@@ -331,6 +331,16 @@ def _run_scheduled_task(task: str, *, dry_run: bool) -> int:
         elif not scores:
             console.print("[yellow]오늘 스냅샷 없음 — Craft 노트 생략[/yellow]")
 
+        # CLAUDE.md 6) Phase 5 — daily 잡 직후 DB 자동 백업
+        if not dry_run:
+            from stock_compass.utils.backup import backup_database
+
+            backup_path = backup_database(on_date=today_kst())
+            if backup_path is not None:
+                console.print(
+                    f"[dim]✓ DB 백업: {backup_path.name}[/dim]"
+                )
+
     return exit_code
 
 
