@@ -1,4 +1,4 @@
-"""Fundamentals factor — 5 component (revenue/earnings/roe/op_margin/fcf_yield)."""
+"""Fundamentals factor — 5 component (revenue/earnings/roe/op_margin/fcf_yield) + sector 보정."""
 
 from __future__ import annotations
 
@@ -6,6 +6,21 @@ import pytest
 
 from stock_compass.factors import fundamentals
 from stock_compass.markets.base import Fundamentals
+
+
+@pytest.fixture(autouse=True)
+def clear_cache() -> None:
+    fundamentals.clear_sector_medians_cache()
+
+
+def _patch_medians(
+    monkeypatch: pytest.MonkeyPatch, medians: dict[str, float | None]
+) -> None:
+    monkeypatch.setattr(
+        fundamentals,
+        "_get_sector_fundamental_medians",
+        lambda market, sector: medians,
+    )
 
 
 class _FakeAdapter:
@@ -135,3 +150,65 @@ class TestCalculateIntegration:
         )
         assert "fcf_yield" not in fs.raw_values["component_scores"]
         assert fs.raw_values["fcf_yield"] is None
+
+
+class TestRatioHigherBetter:
+    @pytest.mark.parametrize(
+        "value,median,expected",
+        [
+            (0.20, 0.10, 90.0),  # ratio 2.0
+            (0.13, 0.10, 78.0),  # ratio 1.3
+            (0.105, 0.10, 65.0),  # ratio 1.05
+            (0.08, 0.10, 50.0),  # ratio 0.8
+            (0.05, 0.10, 35.0),  # ratio 0.5
+            (0.02, 0.10, 20.0),  # ratio 0.2
+        ],
+    )
+    def test_buckets(self, value: float, median: float, expected: float) -> None:
+        assert fundamentals._score_ratio_higher_better(value, median) == expected
+
+    def test_negative_or_zero_returns_none(self) -> None:
+        # 음수 ROE는 ratio 무의미 — None (factor에서 absolute fallback)
+        assert fundamentals._score_ratio_higher_better(-0.05, 0.10) is None
+        assert fundamentals._score_ratio_higher_better(0.10, -0.05) is None
+        assert fundamentals._score_ratio_higher_better(0.10, 0) is None
+
+
+class TestSectorBoost:
+    """AT3 — fundamentals factor가 sector median 활용."""
+
+    def test_cold_start_uses_absolute(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_medians(monkeypatch, {})
+        fs = fundamentals.calculate(
+            _FakeAdapter(_fund(roe=0.20, operating_margin=0.10)),
+            "AAPL",
+        )
+        methods = fs.raw_values["scoring_method"]
+        assert all(m == "absolute" for m in methods.values())
+        assert "절대 임계치" in fs.note
+
+    def test_sector_relative_when_medians_present(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ROE 20% vs sector median 10% → ratio 2.0 → 90점 (절대로는 80점)
+        _patch_medians(monkeypatch, {"roe": 0.10})
+        fs = fundamentals.calculate(
+            _FakeAdapter(_fund(roe=0.20)),
+            "AAPL",
+        )
+        assert fs.raw_values["scoring_method"]["roe"] == "sector"
+        assert fs.raw_values["component_scores"]["roe"] == 90.0
+
+    def test_negative_value_falls_back_to_absolute(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # 음수 ROE는 sector ratio 무의미 → 절대 임계치 fallback
+        _patch_medians(monkeypatch, {"roe": 0.10})
+        fs = fundamentals.calculate(
+            _FakeAdapter(_fund(roe=-0.05)),
+            "AAPL",
+        )
+        assert fs.raw_values["scoring_method"]["roe"] == "absolute"
+        assert fs.raw_values["component_scores"]["roe"] == 15.0

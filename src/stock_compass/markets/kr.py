@@ -67,6 +67,82 @@ def is_kosdaq(code: str) -> bool:
     return code in _kosdaq_codes()
 
 
+@lru_cache(maxsize=512)
+def _kr_name(code: str) -> str | None:
+    """pykrx로 KR 종목명 조회. Naver 검색·로깅에 사용. 실패 시 None."""
+    try:
+        from pykrx.stock import get_market_ticker_name
+
+        name = get_market_ticker_name(code)
+        return str(name) if name else None
+    except (ConnectionError, TimeoutError, ValueError, KeyError, OSError) as e:
+        _logger.debug("KR 종목명 조회 실패: %s (%s)", code, e)
+        return None
+
+
+def _fetch_news_naver(code: str, *, days: int) -> list[News]:
+    """Naver Search API로 KR 뉴스 가져옴. client id/secret 없으면 빈 리스트.
+
+    종목명 기준 검색 (pykrx 이름 lookup). 이름 미상이면 Naver 경로 생략.
+    """
+    if not settings.naver_client_id or not settings.naver_client_secret:
+        return []
+    name = _kr_name(code)
+    if not name:
+        _logger.debug("Naver: %s 종목명 미상 — 검색 생략", code)
+        return []
+
+    secret = settings.naver_client_secret.get_secret_value()
+    try:
+        import html
+        import re as _re
+
+        import httpx
+
+        r = httpx.get(
+            "https://openapi.naver.com/v1/search/news.json",
+            headers={
+                "X-Naver-Client-Id": settings.naver_client_id,
+                "X-Naver-Client-Secret": secret,
+            },
+            params={"query": name, "display": 10, "sort": "date"},
+            timeout=10.0,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except (httpx.HTTPError, ValueError) as e:
+        _logger.warning("Naver news fetch 실패: %s (%s)", code, e)
+        return []
+
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+    out: list[News] = []
+    tag_re = _re.compile(r"<[^>]+>")
+    for item in data.get("items", []):
+        try:
+            published = datetime.strptime(
+                item["pubDate"], "%a, %d %b %Y %H:%M:%S %z"
+            )
+        except (ValueError, KeyError):
+            continue
+        if published < cutoff:
+            continue
+        title = html.unescape(tag_re.sub("", str(item.get("title", "")))).strip()
+        article_url = str(item.get("originallink") or item.get("link") or "")
+        desc = html.unescape(tag_re.sub("", str(item.get("description", "")))).strip()
+        if not title or not article_url:
+            continue
+        out.append(
+            News(
+                title=title,
+                url=article_url,
+                published_at=published,
+                source_name="naver",
+                summary=desc or None,
+            )
+        )
+    return out
+
+
 class KrAdapter(MarketAdapter):
     """KR. yfinance 1차 + pykrx 보조 + DART 공시."""
 
@@ -236,7 +312,18 @@ class KrAdapter(MarketAdapter):
     # ─── news ───
 
     def get_news(self, ticker: str, *, days: int = 30) -> list[News]:
+        """KR 뉴스. Naver Open API (있으면) → yfinance (KR 종목엔 거의 없음) fallback.
+
+        Naver client id/secret 셋업 시 KR sentiment 신호 부활. 종목명 기준
+        검색이라 `_kr_name(code)` 가 None 이면 Naver 경로 생략.
+        """
         code = self._normalize_code(ticker)
+        # 1) Naver 시도 (CLAUDE.md 정상 흐름)
+        naver_items = _fetch_news_naver(code, days=days)
+        if naver_items:
+            return naver_items
+
+        # 2) yfinance fallback — KR 종목엔 응답 거의 없으나 미국 상장 KR ADR 등
         symbol = self.to_yfinance_symbol(code)
         try:
             raw = UsAdapter()._fetch_news(symbol)
@@ -263,6 +350,9 @@ class KrAdapter(MarketAdapter):
                 continue
             out.append(News(title=title, url=url, published_at=published))
         return out
+
+    # ─── Naver 뉴스 ───
+    # 정의는 클래스 밖 헬퍼로 — _kr_name(code) lookup 의존성 분리
 
     # ─── disclosures (DART) ───
 

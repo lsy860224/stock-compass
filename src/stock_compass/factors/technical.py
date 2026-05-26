@@ -85,15 +85,44 @@ def _score_ma_distance(d: float | None) -> float | None:
     return 25.0
 
 
-def _score_volume_z(z: float | None) -> float | None:
+def _score_volume_z(
+    z: float | None, return_5d: float | None = None
+) -> float | None:
+    """거래량 z-score 점수.
+
+    가격 변화율과 결합하여 매집(z↑+price↑) vs 투매(z↑+price↓) 구분.
+    return_5d 미지정(과거 호환)이면 기존 abs(z) 절대값 기반.
+    """
     if z is None:
         return None
     abs_z = abs(z)
-    if abs_z > 3:
-        return 70.0
-    if abs_z > 1:
-        return 60.0
-    return 50.0
+    if return_5d is None:
+        # 호환 경로 — 방향성 정보 없음
+        if abs_z > 3:
+            return 70.0
+        if abs_z > 1:
+            return 60.0
+        return 50.0
+    # 방향성 결합
+    if abs_z < 1.0:
+        return 55.0  # 거래량 평범 — 중립
+    # 거래량 폭증
+    if return_5d > 0.02:  # 상승 + 거래량 폭증 = 매집
+        return 80.0 if abs_z > 3 else 70.0
+    if return_5d < -0.02:  # 하락 + 거래량 폭증 = 투매
+        return 25.0 if abs_z > 3 else 35.0
+    # 가격 횡보 + 거래량 폭증 — 의미 모호
+    return 55.0
+
+
+def return_n(close: pd.Series, n: int = 5) -> float | None:
+    """직전 N 거래일 수익률 (close.iloc[-1] / close.iloc[-(n+1)] - 1)."""
+    if len(close) < n + 1:
+        return None
+    base = float(close.iloc[-(n + 1)])
+    if base == 0:
+        return None
+    return float(close.iloc[-1]) / base - 1
 
 
 def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
@@ -107,13 +136,14 @@ def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
     rsi = rsi_14(close)
     dist = ma200_distance(close)
     z = volume_zscore(volume)
+    r5 = return_n(close, 5)
 
     components: dict[str, float] = {}
     if (s := _score_rsi(rsi)) is not None:
         components["rsi_14"] = s
     if (s := _score_ma_distance(dist)) is not None:
         components["ma200_distance"] = s
-    if (s := _score_volume_z(z)) is not None:
+    if (s := _score_volume_z(z, r5)) is not None:
         components["volume_zscore"] = s
 
     if not components:
@@ -132,6 +162,7 @@ def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
             "rsi_14": rsi,
             "ma200_distance": dist,
             "volume_zscore": z,
+            "return_5d": r5,
             "last_close": float(close.iloc[-1]),
             "data_points": len(close),
             "component_scores": components,

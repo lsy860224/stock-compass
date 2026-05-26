@@ -9,7 +9,9 @@ import pytest
 from stock_compass.factors.technical import (
     _score_ma_distance,
     _score_rsi,
+    _score_volume_z,
     ma200_distance,
+    return_n,
     rsi_14,
     volume_zscore,
 )
@@ -102,3 +104,56 @@ class TestVolumeZScore:
         z = volume_zscore(s)
         assert z is not None
         assert -5 < z < 5  # 정상 분포에서 합리적 범위
+
+
+class TestReturnN:
+    def test_short_series(self) -> None:
+        assert return_n(pd.Series([1.0, 2.0, 3.0]), n=5) is None
+
+    def test_5d_positive(self) -> None:
+        # 100 → 110 = +10%
+        s = pd.Series([100, 105, 108, 102, 106, 110])
+        assert return_n(s, n=5) == pytest.approx(0.10)
+
+    def test_zero_base_safe(self) -> None:
+        s = pd.Series([0, 1, 2, 3, 4, 5])
+        assert return_n(s, n=5) is None  # base 0 → None
+
+
+class TestVolumeZScoreDirectional:
+    """AT1 — volume z-score가 price return과 결합되어 매집/투매 구분."""
+
+    def test_none_z_returns_none(self) -> None:
+        assert _score_volume_z(None) is None
+        assert _score_volume_z(None, return_5d=0.10) is None
+
+    def test_backward_compat_without_return(self) -> None:
+        # return_5d 없으면 기존 abs(z) 절대값 경로
+        assert _score_volume_z(2.0) == 60.0
+        assert _score_volume_z(0.5) == 50.0
+        assert _score_volume_z(4.0) == 70.0
+
+    def test_buying_pressure_high_z(self) -> None:
+        # 거래량 폭증 + 가격 상승 = 매집 (80점)
+        assert _score_volume_z(3.5, return_5d=0.05) == 80.0
+
+    def test_buying_pressure_moderate_z(self) -> None:
+        # 거래량 증가 + 가격 상승 (70점)
+        assert _score_volume_z(1.5, return_5d=0.03) == 70.0
+
+    def test_selling_pressure_high_z(self) -> None:
+        # 거래량 폭증 + 가격 하락 = 투매 (25점)
+        assert _score_volume_z(3.5, return_5d=-0.05) == 25.0
+
+    def test_selling_pressure_moderate_z(self) -> None:
+        assert _score_volume_z(1.5, return_5d=-0.03) == 35.0
+
+    def test_low_z_neutral(self) -> None:
+        # 거래량 평범 (|z|<1) — 중립
+        assert _score_volume_z(0.5, return_5d=0.10) == 55.0
+        assert _score_volume_z(-0.5, return_5d=-0.10) == 55.0
+
+    def test_high_z_flat_price_neutral(self) -> None:
+        # 거래량 폭증 + 가격 횡보 — 신호 모호
+        assert _score_volume_z(3.0, return_5d=0.005) == 55.0
+        assert _score_volume_z(3.0, return_5d=-0.005) == 55.0
