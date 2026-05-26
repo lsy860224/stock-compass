@@ -1,4 +1,4 @@
-"""CraftExporter — 마크다운 렌더링 + 파일 백업 동작."""
+"""CraftExporter — 마크다운 렌더링 + 파일 백업 동작 + Δ/sector rank/footer."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ def _mk(
     name: str | None = None,
     price: float | None = None,
     currency: str | None = None,
+    sector: str | None = None,
 ) -> CompositeScore:
     factors = [
         FactorScore(
@@ -39,6 +40,7 @@ def _mk(
         price_at_score=price,
         currency=currency or ("USD" if market == "US" else "KRW"),
         name=name,
+        sector=sector,
     )
 
 
@@ -104,6 +106,98 @@ class TestRenderDailyNote:
         )
         # HIGH가 LOW보다 먼저 등장해야 함
         assert md.index("HIGH") < md.index("LOW")
+
+
+class TestDecorations:
+    """BT1 (Δ + 변화 highlight) + BT3 (sector rank) + BT4 (token footer)."""
+
+    def test_delta_column_appears_when_previous_provided(
+        self, exporter: CraftExporter
+    ) -> None:
+        s = _mk("AAPL", 75.0, name="Apple", price=150.0)
+        previous = {("AAPL", "US"): (60.0, "중립")}
+        md = exporter.render_daily_note(
+            [s], on_date=date(2026, 5, 22), previous_scores=previous
+        )
+        assert "| Δ |" in md
+        assert "+15.0" in md  # 60 → 75
+
+    def test_delta_column_hidden_when_no_previous(
+        self, exporter: CraftExporter
+    ) -> None:
+        s = _mk("AAPL", 75.0, name="Apple")
+        md = exporter.render_daily_note([s], on_date=date(2026, 5, 22))
+        assert "| Δ |" not in md
+
+    def test_change_highlight_section_for_verdict_change(
+        self, exporter: CraftExporter
+    ) -> None:
+        s = _mk("AAPL", 75.0)  # 관심권
+        previous = {("AAPL", "US"): (60.0, "중립")}  # 어제 중립 → 오늘 관심권
+        md = exporter.render_daily_note(
+            [s], on_date=date(2026, 5, 22), previous_scores=previous
+        )
+        assert "## 변화 highlight" in md
+        assert "판단 변경" in md
+        assert "중립 → **관심권**" in md
+        assert "상승 ▲" in md
+
+    def test_change_highlight_section_fallers(
+        self, exporter: CraftExporter
+    ) -> None:
+        s = _mk("AAPL", 50.0)
+        previous = {("AAPL", "US"): (70.0, "관심권")}  # 20점 하락
+        md = exporter.render_daily_note(
+            [s], on_date=date(2026, 5, 22), previous_scores=previous
+        )
+        assert "하락 ▼" in md
+        assert "Δ-20.0" in md
+
+    def test_small_delta_excluded_from_highlight(
+        self, exporter: CraftExporter
+    ) -> None:
+        s = _mk("AAPL", 72.0)
+        previous = {("AAPL", "US"): (70.0, "관심권")}  # 2점 변화 (< 5)
+        md = exporter.render_daily_note(
+            [s], on_date=date(2026, 5, 22), previous_scores=previous
+        )
+        # Δ 컬럼은 표시되지만 highlight 섹션은 안 나옴
+        assert "## 변화 highlight" not in md
+
+    def test_ticker_card_shows_yesterday_to_today(
+        self, exporter: CraftExporter
+    ) -> None:
+        s = _mk("AAPL", 75.0, name="Apple", sector="Tech")
+        previous = {("AAPL", "US"): (60.0, "중립")}
+        md = exporter.render_daily_note(
+            [s], on_date=date(2026, 5, 22), previous_scores=previous
+        )
+        assert "어제 60.0 → 오늘 75.0" in md
+
+    def test_ticker_card_shows_sector_rank(
+        self, exporter: CraftExporter
+    ) -> None:
+        s = _mk("AAPL", 75.0, sector="Technology")
+        ranks = {("AAPL", "US"): (2, 8)}
+        md = exporter.render_daily_note(
+            [s], on_date=date(2026, 5, 22), sector_ranks=ranks
+        )
+        assert "Technology sector 8종 중 **2위**" in md
+
+    def test_footer_shows_token_usage(
+        self, exporter: CraftExporter
+    ) -> None:
+        usage = {
+            "input_tokens": 12340,
+            "output_tokens": 500,
+            "call_count": 5,
+            "cost_usd": 0.0234,
+        }
+        md = exporter.render_daily_note(
+            [_mk("AAPL", 60.0)], on_date=date(2026, 5, 22), token_usage=usage
+        )
+        assert "Anthropic API 사용량" in md
+        assert "12,340" in md
 
 
 class TestExportToFile:

@@ -635,6 +635,14 @@ def _print_field_cheatsheet() -> None:
             ],
         ),
         (
+            "Macro / Sentiment",
+            [
+                ("macro_score", "Macro 점수 0~100 (VIX·금리·KR USD/KRW)"),
+                ("sentiment_score", "Sentiment 점수 0~100 (뉴스·공시 톤)"),
+                ("sentiment_source", "api/manual_prompt/fallback/cache/placeholder"),
+            ],
+        ),
+        (
             "메타",
             [
                 ("code", "종목 코드"),

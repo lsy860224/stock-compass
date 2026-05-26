@@ -11,6 +11,7 @@ from rich.text import Text
 from rich.tree import Tree
 
 from stock_compass.factors.base import FactorScore
+from stock_compass.markets.base import Market
 from stock_compass.output.valuation_range import ValuationRange
 from stock_compass.scoring.engine import DISCLAIMER, CompositeScore, Verdict
 
@@ -23,12 +24,21 @@ _VERDICT_STYLE: dict[Verdict, str] = {
     "주의": "bold red",
 }
 
+# 호출자 보조 데이터 — 어제 점수·sector rank (생략 시 컬럼 미표시)
+PreviousScores = dict[tuple[str, Market], tuple[float, Verdict]]
+SectorRanks = dict[tuple[str, Market], tuple[int, int]]
 
-def render_single_score(score: CompositeScore, console: Console | None = None) -> None:
+
+def render_single_score(
+    score: CompositeScore,
+    console: Console | None = None,
+    *,
+    sector_rank: tuple[int, int] | None = None,
+) -> None:
     """단일 종목 점수 + 5팩터 분해 + valuation range + 면책 출력."""
     console = console or Console()
 
-    header = _header_panel(score)
+    header = _header_panel(score, sector_rank=sector_rank)
     table = _factors_table(score.factors)
 
     console.print(header)
@@ -89,13 +99,21 @@ def _try_valuation_range(score: CompositeScore) -> ValuationRange | None:
         return None
 
 
-def _header_panel(score: CompositeScore) -> Panel:
+def _header_panel(
+    score: CompositeScore,
+    *,
+    sector_rank: tuple[int, int] | None = None,
+) -> Panel:
     verdict_text = Text(score.verdict, style=_VERDICT_STYLE[score.verdict])
     price_txt = (
         f"  ·  가격 {score.price_at_score:,.2f} {score.currency}"
         if score.price_at_score is not None
         else ""
     )
+    sector_txt = ""
+    if sector_rank is not None and score.sector:
+        r, total = sector_rank
+        sector_txt = f"\n{score.sector} sector {total}종 중 {r}위"
     body = Text.assemble(
         (score.ticker, "bold cyan"),
         (f" [{score.market}]", "dim"),
@@ -104,6 +122,7 @@ def _header_panel(score: CompositeScore) -> Panel:
         (" / 100   ", "dim"),
         verdict_text,
         (price_txt, "dim"),
+        (sector_txt, "dim"),
     )
     return Panel(body, border_style="cyan", padding=(0, 1))
 
@@ -136,8 +155,16 @@ def _color_score(score: float) -> Text:
     return Text(f"{score:.1f}", style=style)
 
 
-def render_score_ranking(scores: list[CompositeScore], console: Console | None = None) -> None:
-    """워치리스트 batch 결과를 종합 점수 내림차순 테이블로 표시."""
+def render_score_ranking(
+    scores: list[CompositeScore],
+    console: Console | None = None,
+    *,
+    previous_scores: PreviousScores | None = None,
+) -> None:
+    """워치리스트 batch 결과를 종합 점수 내림차순 테이블로 표시.
+
+    previous_scores 주입 시 Δ 컬럼 자동 노출 (BT1 — 어제 대비).
+    """
     console = console or Console()
     if not scores:
         console.print(
@@ -146,11 +173,14 @@ def render_score_ranking(scores: list[CompositeScore], console: Console | None =
         return
 
     ordered = sorted(scores, key=lambda s: s.total_score, reverse=True)
+    has_delta = bool(previous_scores)
     table = Table(title=f"워치리스트 점수 순위 ({len(ordered)}종목)", show_lines=False)
     table.add_column("순", justify="right", style="dim")
     table.add_column("종목", style="cyan")
     table.add_column("시장", justify="center", style="dim")
     table.add_column("종합", justify="right")
+    if has_delta:
+        table.add_column("Δ", justify="right")
     table.add_column("판단", justify="center")
     table.add_column("가격", justify="right")
     table.add_column("V", justify="right", style="dim")
@@ -159,6 +189,7 @@ def render_score_ranking(scores: list[CompositeScore], console: Console | None =
     table.add_column("M", justify="right", style="dim")
     table.add_column("S", justify="right", style="dim")
 
+    prev = previous_scores or {}
     for i, s in enumerate(ordered, start=1):
         price_str = (
             f"{s.price_at_score:,.2f} {s.currency}"
@@ -166,19 +197,26 @@ def render_score_ranking(scores: list[CompositeScore], console: Console | None =
             else "—"
         )
         f_map = {f.name: f.score for f in s.factors}
-        table.add_row(
+        row_cells: list[str | Text] = [
             str(i),
             f"{s.ticker}" + (f"\n[dim]{s.name}[/dim]" if s.name else ""),
             s.market,
             _color_score(s.total_score),
-            Text(s.verdict, style=_VERDICT_STYLE[s.verdict]),
-            price_str,
-            _short(f_map.get("valuation")),
-            _short(f_map.get("fundamentals")),
-            _short(f_map.get("technical")),
-            _short(f_map.get("macro")),
-            _short(f_map.get("sentiment")),
+        ]
+        if has_delta:
+            row_cells.append(_delta_text(s, prev))
+        row_cells.extend(
+            [
+                Text(s.verdict, style=_VERDICT_STYLE[s.verdict]),
+                price_str,
+                _short(f_map.get("valuation")),
+                _short(f_map.get("fundamentals")),
+                _short(f_map.get("technical")),
+                _short(f_map.get("macro")),
+                _short(f_map.get("sentiment")),
+            ]
         )
+        table.add_row(*row_cells)
 
     console.print(table)
     console.print(
@@ -189,6 +227,18 @@ def render_score_ranking(scores: list[CompositeScore], console: Console | None =
             padding=(0, 1),
         )
     )
+
+
+def _delta_text(s: CompositeScore, prev: PreviousScores) -> Text:
+    info = prev.get((s.ticker, s.market))
+    if info is None:
+        return Text("—", style="dim")
+    delta = s.total_score - info[0]
+    if abs(delta) < 0.05:
+        return Text("0", style="dim")
+    sign = "+" if delta > 0 else ""
+    style = "green" if delta > 0 else "red"
+    return Text(f"{sign}{delta:.1f}", style=style)
 
 
 def render_history(

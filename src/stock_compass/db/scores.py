@@ -299,6 +299,76 @@ def get_scores_on_date(
     ]
 
 
+def get_previous_total_scores(
+    conn: sqlite3.Connection,
+    code_markets: list[tuple[str, Market]],
+    *,
+    before_date: date_cls,
+) -> dict[tuple[str, Market], tuple[float, Verdict]]:
+    """입력 종목들 각각의 `before_date` 이전 가장 최근 (total_score, verdict).
+
+    워치리스트 batch 결과를 어제 대비 비교할 때 호출 (BT1 — Δ 표시).
+    누락된 키는 dict에 포함 안 됨 (cold-start 종목).
+    """
+    if not code_markets:
+        return {}
+    result: dict[tuple[str, Market], tuple[float, Verdict]] = {}
+    for code, market in code_markets:
+        ticker_id = get_ticker_id(conn, code, market)
+        if ticker_id is None:
+            continue
+        row = conn.execute(
+            """
+            SELECT total_score, verdict
+            FROM composite_scores
+            WHERE ticker_id = ? AND date < ?
+            ORDER BY date DESC
+            LIMIT 1
+            """,
+            (ticker_id, before_date.isoformat()),
+        ).fetchone()
+        if row is not None:
+            result[(code, market)] = (float(row["total_score"]), row["verdict"])
+    return result
+
+
+def get_sector_score_rank(
+    conn: sqlite3.Connection,
+    market: Market,
+    sector: str | None,
+    ticker_id: int,
+) -> tuple[int, int] | None:
+    """같은 (market, sector) 내 최신 composite_score 기준 ticker_id의 (rank, total).
+
+    표본 < 2 (peer 부재) 또는 sector 미상이면 None.
+    """
+    if not sector:
+        return None
+    rows = conn.execute(
+        """
+        WITH latest_per_ticker AS (
+          SELECT cs.ticker_id, MAX(cs.date) AS d
+          FROM composite_scores cs
+          GROUP BY cs.ticker_id
+        )
+        SELECT cs.ticker_id, cs.total_score
+        FROM composite_scores cs
+        JOIN tickers t ON t.id = cs.ticker_id
+        JOIN latest_per_ticker l
+          ON cs.ticker_id = l.ticker_id AND cs.date = l.d
+        WHERE t.market = ? AND t.sector = ?
+        ORDER BY cs.total_score DESC, cs.ticker_id ASC
+        """,
+        (market, sector),
+    ).fetchall()
+    if len(rows) < 2:
+        return None
+    for i, r in enumerate(rows, start=1):
+        if int(r["ticker_id"]) == ticker_id:
+            return (i, len(rows))
+    return None
+
+
 def get_sector_valuation_medians(
     conn: sqlite3.Connection,
     market: Market,
