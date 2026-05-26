@@ -15,7 +15,7 @@ from stock_compass.output.valuation_range import ValuationRange
 from stock_compass.scoring.engine import DISCLAIMER, CompositeScore, Verdict
 
 if TYPE_CHECKING:
-    from stock_compass.db.repository import HistoryRow
+    from stock_compass.db import HistoryRow
 
 _VERDICT_STYLE: dict[Verdict, str] = {
     "관심권": "bold green",

@@ -18,7 +18,7 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from stock_compass.db.repository import HistoryRow
+    from stock_compass.db import HistoryRow
 
 _logger = logging.getLogger(__name__)
 
