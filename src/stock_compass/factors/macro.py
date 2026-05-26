@@ -1,4 +1,9 @@
-"""Macro 팩터 — FRED VIX·10Y·장단기 스프레드 (글로벌 risk-on/off)."""
+"""Macro 팩터 — FRED VIX·10Y·장단기 스프레드 + KR 종목 시 USD/KRW.
+
+CLAUDE.md 8) Macro 15%는 미국 거시(VIX/T10Y2Y/DGS10)가 베이스. KR 종목은
+USD/KRW 환율(FRED DEXKOUS)을 추가 가중하여 한국 거시 영향(외인 자금·수출)
+일부 반영. US 종목은 기존 3 시리즈 그대로.
+"""
 
 from __future__ import annotations
 
@@ -91,24 +96,54 @@ def _score_dgs10(y: float | None) -> float | None:
     return 30.0
 
 
+def _score_usdkrw(rate: float | None) -> float | None:
+    """USD/KRW. 낮을수록 (원화 강세) 외인 자금·수입 우호 → 가산. KR 종목 전용."""
+    if rate is None or rate <= 0:
+        return None
+    if rate < 1100:
+        return 75.0
+    if rate < 1200:
+        return 65.0
+    if rate < 1300:
+        return 55.0
+    if rate < 1400:
+        return 40.0
+    return 25.0
+
+
 def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
-    _ = (adapter, ticker)  # macro는 글로벌 — 종목 무관
+    _ = ticker
+    market = adapter.market
     vix = _latest("VIXCLS")
     spread = _latest("T10Y2Y")
     dgs10 = _latest("DGS10")
+    usdkrw = _latest("DEXKOUS") if market == "KR" else None
 
     s_vix = _score_vix(vix)
     s_spread = _score_spread(spread)
     s_dgs10 = _score_dgs10(dgs10)
+    s_usdkrw = _score_usdkrw(usdkrw)
 
-    # 가중: VIX 0.45, T10Y2Y 0.35, DGS10 0.20 — 사용 가능한 것만으로 정규화
-    weights = {"vix": (s_vix, 0.45), "spread": (s_spread, 0.35), "dgs10": (s_dgs10, 0.20)}
+    # 시장별 가중: KR은 USD/KRW 비중 0.30을 차지하고 나머지 축소
+    if market == "KR":
+        weights = {
+            "vix": (s_vix, 0.30),
+            "spread": (s_spread, 0.25),
+            "dgs10": (s_dgs10, 0.15),
+            "usdkrw": (s_usdkrw, 0.30),
+        }
+    else:
+        weights = {
+            "vix": (s_vix, 0.45),
+            "spread": (s_spread, 0.35),
+            "dgs10": (s_dgs10, 0.20),
+        }
     valid = {k: (s, w) for k, (s, w) in weights.items() if s is not None}
     if not valid:
         return neutral(
             "macro",
             "FRED 데이터 모두 누락",
-            raw={"vix": vix, "spread": spread, "dgs10": dgs10},
+            raw={"vix": vix, "spread": spread, "dgs10": dgs10, "usdkrw": usdkrw},
         )
 
     total_weight = sum(w for _, w in valid.values())
@@ -122,8 +157,10 @@ def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
             "vix": vix,
             "t10y2y_spread": spread,
             "dgs10": dgs10,
+            "usdkrw": usdkrw,
+            "market_used": market,
             "component_scores": {k: s for k, (s, _) in valid.items()},
         },
-        note=f"FRED {len(valid)}개 시리즈 (글로벌, 종목 무관)",
+        note=f"FRED {len(valid)}개 시리즈 (시장={market})",
         source="fred",
     )

@@ -249,3 +249,17 @@ class TestBudgetFilter:
         )
         codes = [r["code"] for r in result.rows]
         assert codes == ["005930"]
+
+    def test_budget_wrap_preserves_score_order(self, db_path: Path) -> None:
+        """budget CTE wrap이 composite_score 정렬을 잃지 않아야 함 (P2-2)."""
+        _seed_score(db_path, "AAPL", 30.0, market="US", price=50.0)
+        _seed_score(db_path, "NVDA", 80.0, market="US", price=100.0)
+        _seed_score(db_path, "MSFT", 60.0, market="US", price=120.0)
+        # base SQL이 ORDER BY composite_score 안 갖더라도 outer SELECT 가 보장
+        result = ScreenerEngine().run_sql(
+            "SELECT code, composite_score, price FROM v_latest_scores",
+            budget=150.0,
+        )
+        scores = [r["composite_score"] for r in result.rows]
+        assert scores == sorted(scores, reverse=True)
+        assert scores[0] == 80.0  # NVDA 최상위
