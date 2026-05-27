@@ -18,6 +18,12 @@ from stock_compass.db.alerts import (
     has_recent_alert,
     record_alert,
 )
+from stock_compass.db.backtest import (
+    BacktestRow,
+    get_backtest_result,
+    list_backtest_results,
+    save_backtest_result,
+)
 from stock_compass.db.migrations import MIGRATIONS, migrate
 from stock_compass.db.news import (
     NewsSummaryRow,
@@ -59,10 +65,12 @@ __all__ = [
     "DEFAULT_HINDSIGHT_DAYS",
     "MIGRATIONS",
     "AlertRow",
+    "BacktestRow",
     "HistoryRow",
     "NewsSummaryRow",
     "Trade",
     "TradeWithHindsight",
+    "get_backtest_result",
     "get_cached_news_summary",
     "get_db_connection",
     "get_last_score",
@@ -84,9 +92,11 @@ __all__ = [
     "has_daily_alert_today",
     "has_recent_alert",
     "insert_trade",
+    "list_backtest_results",
     "migrate",
     "record_alert",
     "record_token_usage",
+    "save_backtest_result",
     "summarize_hindsight",
     "upsert_composite_score",
     "upsert_news_summary",
