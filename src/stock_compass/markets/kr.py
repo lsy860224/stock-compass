@@ -355,14 +355,25 @@ class KrAdapter(MarketAdapter):
     # ─── Naver 뉴스 ───
     # 정의는 클래스 밖 헬퍼로 — _kr_name(code) lookup 의존성 분리
 
-    # ─── 분기 재무 (백필용) — yfinance 위임 ───
+    # ─── 분기 재무 (백필용) — DART 우선 → yfinance fallback ───
 
     def get_quarterly_financials(self, ticker: str) -> QuarterlyFinancials:
-        """KR 종목 분기 재무 — yfinance .KS/.KQ 심볼로 위임.
+        """KR 종목 분기 재무.
 
-        KR yfinance financials 데이터 가용성은 종목별 편차 큼 (시총 큰 종목 위주).
+        1순위: DART OpenAPI (finstate) — 정기보고서 4종 fetch + 누적 차감 (Q4)
+        2순위: yfinance .KS — KR 분기 데이터는 가용성 낮음
+        둘 다 빈 결과면 빈 객체 → V/F backfill_skip 폴백.
         """
         code = self._normalize_code(ticker)
+        from stock_compass.markets._kr_dart_financials import (
+            fetch_kr_quarterly_via_dart,
+        )
+
+        qf = fetch_kr_quarterly_via_dart(code)
+        if not qf.is_empty():
+            return qf
+
+        # DART 빈 결과 → yfinance fallback
         return UsAdapter().get_quarterly_financials(code).model_copy(
             update={"ticker": code, "market": "KR"}
         )
