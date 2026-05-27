@@ -14,6 +14,7 @@ from stock_compass.markets._kr_dart_financials import (
     _ReprtData,
     fetch_kr_quarterly_via_dart,
 )
+
 # 기존 코드 호환 — _parse_finstate_df 는 _parse_finstate_all_df 로 대체됐지만
 # 이전 테스트 파일이 import 한다면 alias 제공 (현재는 같은 함수)
 _parse_finstate_df = _parse_finstate_all_df

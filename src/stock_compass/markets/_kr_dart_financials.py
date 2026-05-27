@@ -41,6 +41,10 @@ _ACCOUNT_ID_MAP: dict[str, str] = {
     "ifrs-full_ProfitLoss": "net_income",
     "ifrs-full_Equity": "equity",
     "ifrs-full_CashFlowsFromUsedInOperatingActivities": "operating_cashflow",
+    # CapEx — 유형자산의 취득 (FCF 정확도 위해 차감)
+    "ifrs-full_PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities": "capex",
+    "ifrs-full_PurchaseOfPropertyPlantAndEquipment": "capex",
+    "dart_PurchaseOfPropertyPlantAndEquipment": "capex",
 }
 
 # account_nm fallback (account_id 가 표준이 아닐 때) — (sj_div, account_nm) → 키
@@ -57,18 +61,21 @@ _ACCOUNT_NM_MAP: dict[tuple[str, str], str] = {
     ("CIS", "당기순이익(손실)"): "net_income",
     ("CF", "영업활동현금흐름"): "operating_cashflow",
     ("CF", "영업활동으로인한현금흐름"): "operating_cashflow",
+    ("CF", "유형자산의 취득"): "capex",
+    ("CF", "유형자산의취득"): "capex",
 }
 
 
 @dataclass(frozen=True, slots=True)
 class _ReprtData:
-    """단일 보고서의 손익/자본/현금흐름."""
+    """단일 보고서의 손익/자본/현금흐름 + CapEx (FCF 정확도)."""
 
     revenue: float | None
     operating_income: float | None
     net_income: float | None
     equity: float | None
     operating_cashflow: float | None = None
+    capex: float | None = None  # 유형자산의 취득 — FCF 차감용
 
 
 def fetch_kr_quarterly_via_dart(
@@ -161,6 +168,7 @@ def _parse_finstate_all_df(df: Any) -> _ReprtData:
         "net_income": None,
         "equity": None,
         "operating_cashflow": None,
+        "capex": None,
     }
     # 1차: account_id 매핑 (안정적)
     for _, row in df.iterrows():
@@ -191,6 +199,7 @@ def _parse_finstate_all_df(df: Any) -> _ReprtData:
         net_income=out["net_income"],
         equity=out["equity"],
         operating_cashflow=out["operating_cashflow"],
+        capex=out["capex"],
     )
 
 
@@ -231,6 +240,7 @@ def _build_quarters(
             ocf_q4 = _annual_minus_quarters(
                 data.operating_cashflow, q1, q2, q3, "operating_cashflow"
             )
+            capex_q4 = _annual_minus_quarters(data.capex, q1, q2, q3, "capex")
             quarters.append(
                 QuarterlyDatum(
                     period_end=period_end,
@@ -238,7 +248,7 @@ def _build_quarters(
                     revenue=rev_q4,
                     operating_income=op_q4,
                     net_income=ni_q4,
-                    free_cash_flow=ocf_q4,  # FCF proxy = operating CF (CapEx 차감 X)
+                    free_cash_flow=_compute_fcf(ocf_q4, capex_q4),
                     equity=data.equity,
                 )
             )
@@ -251,11 +261,25 @@ def _build_quarters(
                     revenue=data.revenue,
                     operating_income=data.operating_income,
                     net_income=data.net_income,
-                    free_cash_flow=data.operating_cashflow,  # FCF proxy
+                    free_cash_flow=_compute_fcf(
+                        data.operating_cashflow, data.capex
+                    ),
                     equity=data.equity,
                 )
             )
     return sorted(quarters, key=lambda q: q.period_end, reverse=True)
+
+
+def _compute_fcf(op_cf: float | None, capex: float | None) -> float | None:
+    """FCF = Operating CF - CapEx. CapEx 없으면 op_cf proxy (보수적).
+
+    DART CapEx ("유형자산의 취득") 는 양수 값으로 들어옴 — 차감 시 부호 일관.
+    """
+    if op_cf is None:
+        return None
+    if capex is None:
+        return op_cf  # proxy fallback
+    return op_cf - capex
 
 
 def _quarter_meta(

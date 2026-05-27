@@ -68,6 +68,17 @@ def is_kosdaq(code: str) -> bool:
     return code in _kosdaq_codes()
 
 
+def _kr_sector_from_dart(code: str) -> str | None:
+    """DART KSIC → GICS 매핑 lazy wrapper. _kr_sector_classifier import 격리."""
+    try:
+        from stock_compass.markets._kr_sector_classifier import get_kr_sector
+
+        return get_kr_sector(code)
+    except Exception as e:
+        _logger.debug("KR sector DART 조회 실패: %s (%s)", code, e)
+        return None
+
+
 @lru_cache(maxsize=512)
 def _kr_name(code: str) -> str | None:
     """pykrx로 KR 종목명 조회. Naver 검색·로깅에 사용. 실패 시 None."""
@@ -260,6 +271,10 @@ class KrAdapter(MarketAdapter):
                 save_json(cache_name, info)
         info = info or {}
 
+        # sector — yfinance 가 부정확/누락이면 DART KSIC → GICS 로 교정
+        yf_sector = _get(info, "sector", as_=str)
+        sector = yf_sector or _kr_sector_from_dart(code)
+
         # pykrx로 PER/PBR 보강 (yfinance KR 누락 빈번)
         per = _get(info, "trailingPE", as_=float)
         pbr = _get(info, "priceToBook", as_=float)
@@ -273,7 +288,7 @@ class KrAdapter(MarketAdapter):
             market="KR",
             currency="KRW",
             name=_get(info, "longName", "shortName", as_=str),
-            sector=_get(info, "sector", as_=str),
+            sector=sector,
             per=per,
             forward_per=_get(info, "forwardPE", as_=float),
             pbr=pbr,
