@@ -182,3 +182,29 @@ class TestDbMetadata:
         meta = _data.db_metadata()
         assert meta["score_count"] == 1
         assert meta["latest_score_date"] == "2024-01-05"
+
+
+class TestBacktestHelpers:
+    def test_adapt_preset_converts_v_latest_scores(self) -> None:
+        sql = "SELECT code FROM v_latest_scores WHERE composite_score >= 70"
+        out = _data.adapt_preset_for_backtest(sql)
+        assert "v_at_date(:as_of)" in out
+        assert "v_latest_scores" not in out
+
+    def test_adapt_preset_preserves_explicit_at_date(self) -> None:
+        # 이미 :as_of placeholder 가 있으면 그대로
+        sql = "SELECT * FROM v_at_date(:as_of) WHERE composite_score >= 70"
+        assert _data.adapt_preset_for_backtest(sql) == sql
+
+    def test_adapt_preset_preserves_hardcoded_date(self) -> None:
+        # v_at_date('YYYY-MM-DD') 는 사용자 의도 명확 — 변경 X
+        sql = "SELECT * FROM v_at_date('2025-01-01')"
+        assert _data.adapt_preset_for_backtest(sql) == sql
+
+    def test_list_backtestable_presets_returns_pairs(self) -> None:
+        items = _data.list_backtestable_presets()
+        # 최소 1개의 (name, sql) tuple
+        assert all(
+            isinstance(t, tuple) and len(t) == 2 and isinstance(t[0], str)
+            for t in items
+        )
