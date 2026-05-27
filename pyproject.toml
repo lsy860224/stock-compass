@@ -119,6 +119,8 @@ ignore_missing_imports = true
 module = ["stock_compass.dashboard.app"]
 disallow_untyped_calls = false
 disallow_untyped_defs = false
+disallow_untyped_decorators = false
+warn_unused_ignores = false
 
 # ──────────────── pytest ────────────────
 [tool.pytest.ini_options]

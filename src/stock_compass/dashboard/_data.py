@@ -162,6 +162,41 @@ def list_tickers_with_history() -> list[tuple[str, Market, str | None]]:
         return [(r["code"], r["market"], r["name"]) for r in rows]
 
 
+def list_backtestable_presets() -> list[tuple[str, str]]:
+    """backtest 가능 (`v_at_date(:as_of)` 또는 `v_latest_scores` 자동 변환 대상) preset 목록.
+
+    `v_latest_scores` 사용 preset은 `v_at_date(:as_of)` 로 자동 치환 가능 — backtest
+    UI 가 이 변환을 시도. 사용자는 인라인 SQL 도 직접 입력 가능.
+    """
+    from stock_compass.screener import list_presets, load_preset
+
+    out: list[tuple[str, str]] = []
+    for p in list_presets():
+        try:
+            sql = load_preset(p.name)
+        except Exception:
+            continue
+        out.append((p.name, sql))
+    return out
+
+
+def adapt_preset_for_backtest(sql: str) -> str:
+    """preset SQL 의 `v_latest_scores` 를 `v_at_date(:as_of)` 로 치환.
+
+    이미 `v_at_date(:as_of)` 를 사용 중이면 그대로 반환. 추가 발견되는 패턴은
+    `v_at_date('YYYY-MM-DD')` 같이 hard-coded 일 수 있음 — 그건 그대로 (사용자
+    의도가 명확).
+    """
+    import re
+
+    if ":as_of" in sql:
+        return sql
+    if re.search(r"v_at_date\(", sql, re.IGNORECASE):
+        return sql
+    # v_latest_scores → v_at_date(:as_of)
+    return re.sub(r"\bv_latest_scores\b", "v_at_date(:as_of)", sql, flags=re.IGNORECASE)
+
+
 def db_metadata() -> dict[str, Any]:
     """대시보드 헤더용 — DB 경로 + 점수 / 매매 건수 + 최신 날짜."""
     with get_db_connection() as conn:
