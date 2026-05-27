@@ -1,14 +1,16 @@
 """DART OpenDartReader → KR 분기 재무 → QuarterlyFinancials.
 
 yfinance가 .KS 종목의 분기 financials를 거의 안 줘서 KR V/F 시점별 재구성 0%.
-DART 정기보고서 (1Q/반기/3Q/사업) 4종을 fetch.
+DART 정기보고서 (1Q/반기/3Q/사업) 4종 x `finstate_all`(전체 계정과목) 호출 →
+손익(IS) + 자본(BS) + 현금흐름(CF) 통합 추출.
 
-핵심 (DART finstate `thstrm_amount` 의미):
+핵심 (DART `thstrm_amount` 의미):
 - 11013/11012/11014 (1Q/반기/3Q 보고서): 분기 *단독* 데이터 (DART의 IFRS 표시)
 - 11011 (사업보고서): *연간 누적* (12개월 합) — Q4 단독 = 연간 - (Q1+Q2+Q3)
 - BS의 자본총계는 시점값 — 그대로 사용
-- CFS(연결재무제표) 우선, OFS(개별) fallback
-- FCF는 finstate(요약)에 없음 → None (정밀도 v2 에서 finstate_all 활용 가능)
+- CF의 영업활동현금흐름은 손익과 같이 분기 단독(or Q4 차감) 처리
+- account_id (IFRS XBRL 표준) 우선 매핑 → account_nm fallback
+- FCF는 영업CF 만 사용 (CapEx 차감 X — proxy, raw_values 에 명시)
 - publish_after: 분기 보고서 +45일, 사업보고서 다음해 3/31
 """
 
@@ -32,8 +34,17 @@ _CACHE_TTL = timedelta(hours=24)
 # 정기보고서 reprt_code
 _QUARTER_CODES: tuple[str, ...] = ("11013", "11012", "11014", "11011")
 
-# account_nm 매핑 — (sj_div, account_nm) → 통합 키
-_ACCOUNT_MAP: dict[tuple[str, str], str] = {
+# IFRS XBRL account_id 우선 매핑 (안정적)
+_ACCOUNT_ID_MAP: dict[str, str] = {
+    "ifrs-full_Revenue": "revenue",
+    "dart_OperatingIncomeLoss": "operating_income",
+    "ifrs-full_ProfitLoss": "net_income",
+    "ifrs-full_Equity": "equity",
+    "ifrs-full_CashFlowsFromUsedInOperatingActivities": "operating_cashflow",
+}
+
+# account_nm fallback (account_id 가 표준이 아닐 때) — (sj_div, account_nm) → 키
+_ACCOUNT_NM_MAP: dict[tuple[str, str], str] = {
     ("BS", "자본총계"): "equity",
     ("IS", "매출액"): "revenue",
     ("IS", "수익(매출액)"): "revenue",
@@ -44,17 +55,20 @@ _ACCOUNT_MAP: dict[tuple[str, str], str] = {
     ("IS", "당기순이익(손실)"): "net_income",
     ("CIS", "당기순이익"): "net_income",
     ("CIS", "당기순이익(손실)"): "net_income",
+    ("CF", "영업활동현금흐름"): "operating_cashflow",
+    ("CF", "영업활동으로인한현금흐름"): "operating_cashflow",
 }
 
 
 @dataclass(frozen=True, slots=True)
 class _ReprtData:
-    """단일 보고서의 누적 손익 + 시점 자본."""
+    """단일 보고서의 손익/자본/현금흐름."""
 
     revenue: float | None
     operating_income: float | None
     net_income: float | None
     equity: float | None
+    operating_cashflow: float | None = None
 
 
 def fetch_kr_quarterly_via_dart(
@@ -114,46 +128,69 @@ def fetch_kr_quarterly_via_dart(
 def _fetch_single_report(
     dart: Any, code: str, year: int, reprt_code: str
 ) -> _ReprtData | None:
-    """단일 (year, reprt) 보고서 fetch → _ReprtData. 실패 시 None."""
+    """단일 (year, reprt) 보고서 fetch → _ReprtData. 실패 시 None.
+
+    finstate_all (전체 계정과목) 1회 호출로 손익+자본+현금흐름 모두 추출.
+    """
     try:
-        df = dart.finstate(code, year, reprt_code)
+        df = dart.finstate_all(code, year, reprt_code)
     except Exception as e:
         _logger.debug(
-            "DART finstate %s/%d/%s 실패 (계속): %s", code, year, reprt_code, e
+            "DART finstate_all %s/%d/%s 실패 (계속): %s",
+            code,
+            year,
+            reprt_code,
+            e,
         )
         return None
     if df is None or len(df) == 0:
         return None
-    return _parse_finstate_df(df)
+    return _parse_finstate_all_df(df)
 
 
-def _parse_finstate_df(df: Any) -> _ReprtData:
-    """finstate df → _ReprtData. CFS 우선, OFS fallback. 같은 account 중복 시 첫번째."""
+def _parse_finstate_all_df(df: Any) -> _ReprtData:
+    """finstate_all df → _ReprtData.
+
+    account_id (IFRS XBRL 표준) 우선 매핑 — `ifrs-full_Revenue` 같은 안정적
+    식별자. fallback 으로 (sj_div, account_nm) 매핑. 같은 키에 여러 row 있으면
+    첫 번째 값 사용.
+    """
     out: dict[str, float | None] = {
         "revenue": None,
         "operating_income": None,
         "net_income": None,
         "equity": None,
+        "operating_cashflow": None,
     }
-    for fs_pref in ("CFS", "OFS"):
-        if all(v is not None for v in out.values()):
-            break
+    # 1차: account_id 매핑 (안정적)
+    for _, row in df.iterrows():
+        account_id = row.get("account_id")
+        if account_id is None:
+            continue
+        mapped = _ACCOUNT_ID_MAP.get(account_id)
+        if mapped is None or out[mapped] is not None:
+            continue
+        value = _parse_amount(row.get("thstrm_amount"))
+        if value is not None:
+            out[mapped] = value
+
+    # 2차: account_nm fallback (1차에서 못 채운 항목만)
+    if any(v is None for v in out.values()):
         for _, row in df.iterrows():
-            if row.get("fs_div") != fs_pref:
-                continue
             key = (row.get("sj_div"), row.get("account_nm"))
-            mapped = _ACCOUNT_MAP.get(key)
+            mapped = _ACCOUNT_NM_MAP.get(key)
             if mapped is None or out[mapped] is not None:
                 continue
-            amount_str = row.get("thstrm_amount")
-            value = _parse_amount(amount_str)
+            value = _parse_amount(row.get("thstrm_amount"))
             if value is not None:
                 out[mapped] = value
+
     return _ReprtData(
         revenue=out["revenue"],
         operating_income=out["operating_income"],
         net_income=out["net_income"],
         equity=out["equity"],
+        operating_cashflow=out["operating_cashflow"],
     )
 
 
@@ -182,7 +219,7 @@ def _build_quarters(
             continue
 
         if reprt == "11011":
-            # Q4 단독 = 사업(연간) - Q1 - Q2 - Q3
+            # Q4 단독 = 사업(연간) - Q1 - Q2 - Q3 (flow 항목 모두)
             q1 = raw.get((year, "11013"))
             q2 = raw.get((year, "11012"))
             q3 = raw.get((year, "11014"))
@@ -191,6 +228,9 @@ def _build_quarters(
                 data.operating_income, q1, q2, q3, "operating_income"
             )
             ni_q4 = _annual_minus_quarters(data.net_income, q1, q2, q3, "net_income")
+            ocf_q4 = _annual_minus_quarters(
+                data.operating_cashflow, q1, q2, q3, "operating_cashflow"
+            )
             quarters.append(
                 QuarterlyDatum(
                     period_end=period_end,
@@ -198,7 +238,7 @@ def _build_quarters(
                     revenue=rev_q4,
                     operating_income=op_q4,
                     net_income=ni_q4,
-                    free_cash_flow=None,
+                    free_cash_flow=ocf_q4,  # FCF proxy = operating CF (CapEx 차감 X)
                     equity=data.equity,
                 )
             )
@@ -211,7 +251,7 @@ def _build_quarters(
                     revenue=data.revenue,
                     operating_income=data.operating_income,
                     net_income=data.net_income,
-                    free_cash_flow=None,
+                    free_cash_flow=data.operating_cashflow,  # FCF proxy
                     equity=data.equity,
                 )
             )
