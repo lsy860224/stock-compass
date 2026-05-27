@@ -12,6 +12,7 @@ from typing import Any
 
 from stock_compass.config import settings
 from stock_compass.db import (
+    BacktestRow,
     HistoryRow,
     Trade,
     TradeWithHindsight,
@@ -23,6 +24,7 @@ from stock_compass.db import (
     get_ticker_id,
     get_trade_hindsight,
     get_trades,
+    list_backtest_results,
     summarize_hindsight,
 )
 from stock_compass.markets.base import Market
@@ -195,6 +197,16 @@ def adapt_preset_for_backtest(sql: str) -> str:
         return sql
     # v_latest_scores → v_at_date(:as_of)
     return re.sub(r"\bv_latest_scores\b", "v_at_date(:as_of)", sql, flags=re.IGNORECASE)
+
+
+def fetch_backtest_history(
+    *,
+    preset_name: str | None = None,
+    limit: int = 100,
+) -> list[BacktestRow]:
+    """`backtest_results` 최근 실행 목록 — dashboard history 페이지."""
+    with get_db_connection() as conn:
+        return list_backtest_results(conn, preset_name=preset_name, limit=limit)
 
 
 def db_metadata() -> dict[str, Any]:
