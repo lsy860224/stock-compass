@@ -48,6 +48,79 @@ class TestAbsoluteThresholds:
         assert valuation._score_per_absolute(None) is None
         assert valuation._score_pbr_absolute(None) is None
         assert valuation._score_peg_absolute(None) is None
+        assert valuation._score_psr_absolute(None) is None
+        assert valuation._score_ev_ebitda_absolute(None) is None
+        assert valuation._score_p_fcf_absolute(None) is None
+
+    @pytest.mark.parametrize(
+        "psr,expected",
+        [(0.5, 90.0), (1.5, 75.0), (3.0, 55.0), (5.0, 35.0), (10.0, 20.0), (20.0, 10.0)],
+    )
+    def test_psr_buckets(self, psr: float, expected: float) -> None:
+        assert valuation._score_psr_absolute(psr) == expected
+
+    def test_psr_nonpositive_none(self) -> None:
+        assert valuation._score_psr_absolute(0) is None
+        assert valuation._score_psr_absolute(-1) is None
+
+    @pytest.mark.parametrize(
+        "ev,expected",
+        [(5.0, 90.0), (8.0, 75.0), (12.0, 55.0), (18.0, 35.0), (25.0, 20.0), (40.0, 10.0)],
+    )
+    def test_ev_ebitda_buckets(self, ev: float, expected: float) -> None:
+        assert valuation._score_ev_ebitda_absolute(ev) == expected
+
+    def test_ev_ebitda_negative_penalty(self) -> None:
+        # EBITDA 적자 — 30점 패널티 (음수 EV/EBITDA 의 한 해석)
+        assert valuation._score_ev_ebitda_absolute(-5) == 30.0
+
+    @pytest.mark.parametrize(
+        "p_fcf,expected",
+        [(8.0, 90.0), (12.0, 75.0), (20.0, 55.0), (30.0, 35.0), (50.0, 20.0), (100.0, 10.0)],
+    )
+    def test_p_fcf_buckets(self, p_fcf: float, expected: float) -> None:
+        assert valuation._score_p_fcf_absolute(p_fcf) == expected
+
+    def test_p_fcf_nonpositive_none(self) -> None:
+        # 음의 FCF 는 가치 판단 무의미 — None
+        assert valuation._score_p_fcf_absolute(-10) is None
+        assert valuation._score_p_fcf_absolute(0) is None
+
+
+class TestComputePFcf:
+    def test_basic(self) -> None:
+        fund = Fundamentals(
+            ticker="AAPL",
+            market="US",
+            currency="USD",
+            market_cap=1000.0,
+            free_cash_flow=50.0,
+        )
+        assert valuation._compute_p_fcf(fund) == 20.0
+
+    def test_missing_returns_none(self) -> None:
+        # market_cap 없음
+        assert (
+            valuation._compute_p_fcf(
+                Fundamentals(
+                    ticker="X", market="US", currency="USD", free_cash_flow=50.0
+                )
+            )
+            is None
+        )
+        # fcf 음수
+        assert (
+            valuation._compute_p_fcf(
+                Fundamentals(
+                    ticker="X",
+                    market="US",
+                    currency="USD",
+                    market_cap=1000.0,
+                    free_cash_flow=-10.0,
+                )
+            )
+            is None
+        )
 
 
 class TestRatioScoring:
@@ -94,12 +167,39 @@ class TestCalculate:
     ) -> None:
         _patch_medians(monkeypatch, {})
         fs = valuation.calculate(_FakeAdapter(self._fund()), "AAPL")
+        # 새 component (psr/ev_ebitda/p_fcf) 는 fund 에 값 없어 components 미포함
         assert fs.raw_values["scoring_method"] == {
             "per": "absolute",
             "pbr": "absolute",
             "peg": "absolute",
         }
         assert "절대 임계치" in fs.note
+
+    def test_psr_ev_pfcf_included_when_present(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_medians(monkeypatch, {})
+        fs = valuation.calculate(
+            _FakeAdapter(
+                self._fund(
+                    psr=3.0,
+                    ev_ebitda=12.0,
+                    market_cap=1000.0,
+                    free_cash_flow=50.0,
+                )
+            ),
+            "AAPL",
+        )
+        cs = fs.raw_values["component_scores"]
+        # 6 components 모두 산출
+        assert set(cs.keys()) == {"per", "pbr", "peg", "psr", "ev_ebitda", "p_fcf"}
+        # p_fcf = 1000 / 50 = 20 → 55점
+        assert cs["p_fcf"] == 55.0
+        # psr 3.0 → 55점
+        assert cs["psr"] == 55.0
+        # ev/ebitda 12.0 → 55점
+        assert cs["ev_ebitda"] == 55.0
+        assert fs.raw_values["p_fcf"] == 20.0
 
     def test_sector_relative_when_medians_present(
         self, monkeypatch: pytest.MonkeyPatch

@@ -19,7 +19,12 @@ from stock_compass.factors.base import (
     backfill_skip,
     neutral,
 )
-from stock_compass.markets.base import Market, MarketAdapter, QuarterlyFinancials
+from stock_compass.markets.base import (
+    Fundamentals,
+    Market,
+    MarketAdapter,
+    QuarterlyFinancials,
+)
 
 _AbsoluteScorer = Callable[[float | None], float | None]
 
@@ -75,6 +80,59 @@ def _score_peg_absolute(peg: float | None) -> float | None:
     if peg < 3.0:
         return 35.0
     return 15.0
+
+
+def _score_psr_absolute(psr: float | None) -> float | None:
+    """Price-to-Sales TTM. 매출 0인 경우(음수/0) None 처리."""
+    if psr is None or psr <= 0:
+        return None
+    if psr < 1.0:
+        return 90.0
+    if psr < 2.0:
+        return 75.0
+    if psr < 4.0:
+        return 55.0
+    if psr < 7.0:
+        return 35.0
+    if psr < 15.0:
+        return 20.0
+    return 10.0
+
+
+def _score_ev_ebitda_absolute(ev: float | None) -> float | None:
+    """EV/EBITDA. 음수(EBITDA 적자) 패널티 30점."""
+    if ev is None:
+        return None
+    if ev <= 0:
+        return 30.0
+    if ev < 6.0:
+        return 90.0
+    if ev < 10.0:
+        return 75.0
+    if ev < 15.0:
+        return 55.0
+    if ev < 20.0:
+        return 35.0
+    if ev < 30.0:
+        return 20.0
+    return 10.0
+
+
+def _score_p_fcf_absolute(p_fcf: float | None) -> float | None:
+    """Price-to-Free-Cash-Flow = market_cap / FCF. 음의 FCF는 가치판단 무의미 → None."""
+    if p_fcf is None or p_fcf <= 0:
+        return None
+    if p_fcf < 10.0:
+        return 90.0
+    if p_fcf < 15.0:
+        return 75.0
+    if p_fcf < 25.0:
+        return 55.0
+    if p_fcf < 40.0:
+        return 35.0
+    if p_fcf < 70.0:
+        return 20.0
+    return 10.0
 
 
 # ──────────────────────── 상대 점수 (sector median ratio) ────────────────────────
@@ -211,9 +269,22 @@ def calculate_at_date(
 # ──────────────────────── 진입점 ────────────────────────
 
 
+def _compute_p_fcf(fund: Fundamentals) -> float | None:
+    """Price-to-Free-Cash-Flow = market_cap / free_cash_flow."""
+    if (
+        fund.market_cap is None
+        or fund.market_cap <= 0
+        or fund.free_cash_flow is None
+        or fund.free_cash_flow <= 0
+    ):
+        return None
+    return fund.market_cap / fund.free_cash_flow
+
+
 def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
     fund = adapter.get_fundamentals(ticker)
     medians = _get_sector_medians(fund.market, fund.sector)
+    p_fcf = _compute_p_fcf(fund)
 
     components: dict[str, float] = {}
     methods: dict[str, str] = {}
@@ -221,6 +292,14 @@ def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
         ("per", fund.per, medians.get("per"), _score_per_absolute),
         ("pbr", fund.pbr, medians.get("pbr"), _score_pbr_absolute),
         ("peg", fund.peg, medians.get("peg"), _score_peg_absolute),
+        ("psr", fund.psr, medians.get("psr"), _score_psr_absolute),
+        (
+            "ev_ebitda",
+            fund.ev_ebitda,
+            medians.get("ev_ebitda"),
+            _score_ev_ebitda_absolute,
+        ),
+        ("p_fcf", p_fcf, medians.get("p_fcf"), _score_p_fcf_absolute),
     ]
     for name, value, median, absolute_fn in pairs:
         s, method = _score_or_fallback(value, median, absolute_fn)
@@ -231,8 +310,15 @@ def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
     if not components:
         return neutral(
             "valuation",
-            "PER/PBR/PEG 모두 누락",
-            raw={"per": fund.per, "pbr": fund.pbr, "peg": fund.peg},
+            "PER/PBR/PEG/PSR/EV/EBITDA/P/FCF 모두 누락",
+            raw={
+                "per": fund.per,
+                "pbr": fund.pbr,
+                "peg": fund.peg,
+                "psr": fund.psr,
+                "ev_ebitda": fund.ev_ebitda,
+                "p_fcf": p_fcf,
+            },
         )
 
     sector_methods = [n for n, m in methods.items() if m == "sector"]
@@ -250,6 +336,9 @@ def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
             "per": fund.per,
             "pbr": fund.pbr,
             "peg": fund.peg,
+            "psr": fund.psr,
+            "ev_ebitda": fund.ev_ebitda,
+            "p_fcf": p_fcf,
             "dividend_yield": fund.dividend_yield,
             "sector": fund.sector,
             "sector_medians": medians,

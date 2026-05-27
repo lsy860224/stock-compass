@@ -111,6 +111,8 @@ class UsAdapter(MarketAdapter):
             forward_per=_get(info, "forwardPE", as_=float),
             pbr=_get(info, "priceToBook", as_=float),
             peg=_get(info, "pegRatio", "trailingPegRatio", as_=float),
+            psr=_get(info, "priceToSalesTrailing12Months", as_=float),
+            ev_ebitda=_get(info, "enterpriseToEbitda", as_=float),
             dividend_yield=_get(info, "dividendYield", as_=float),
             roe=_get(info, "returnOnEquity", as_=float),
             revenue_growth_yoy=_get(info, "revenueGrowth", as_=float),
