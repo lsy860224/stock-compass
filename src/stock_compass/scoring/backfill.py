@@ -26,11 +26,13 @@ from datetime import date as date_cls
 from pathlib import Path
 from typing import Any
 
+from stock_compass.factors import fundamentals as fundamentals_factor
 from stock_compass.factors import macro as macro_factor
 from stock_compass.factors import technical as technical_factor
+from stock_compass.factors import valuation as valuation_factor
 from stock_compass.factors.base import FactorScore, backfill_skip
 from stock_compass.markets import detect_market, get_adapter
-from stock_compass.markets.base import Market
+from stock_compass.markets.base import Market, QuarterlyFinancials
 from stock_compass.utils.dates import now_utc, today_kst
 from stock_compass.utils.logging import get_logger
 
@@ -100,6 +102,15 @@ def run_backfill(
     if market == "KR":
         series_cache["DEXKOUS"] = macro_factor.fetch_full_series("DEXKOUS")
 
+    # 4) 분기 재무 — 시점별 V/F 재구성용. 실패 시 None 으로 V/F backfill_skip
+    qf: QuarterlyFinancials | None = None
+    try:
+        qf_candidate = adapter.get_quarterly_financials(ticker)
+        if not qf_candidate.is_empty():
+            qf = qf_candidate
+    except Exception as e:
+        _logger.warning("backfill 분기 재무 조회 실패 (V/F skip 진행): %s — %s", ticker, e)
+
     close = hist.df["close"]
     volume = hist.df["volume"]
     currency = "KRW" if market == "KR" else "USD"
@@ -145,6 +156,7 @@ def run_backfill(
                     close_slice=close_slice,
                     volume_slice=volume_slice,
                     series_cache=series_cache,
+                    qf=qf,
                     as_of=as_of,
                 )
                 upsert_composite_score(conn, composite, on_date=as_of)
@@ -176,6 +188,7 @@ def _build_composite_at(
     close_slice: Any,
     volume_slice: Any,
     series_cache: dict[str, Any],
+    qf: QuarterlyFinancials | None,
     as_of: date_cls,
 ) -> Any:
     """시점별 CompositeScore 생성. ScoringEngine 의 _weighted_average 와 동일 로직."""
@@ -185,8 +198,26 @@ def _build_composite_at(
         _verdict,
     )
 
-    v = backfill_skip("valuation")
-    f = backfill_skip("fundamentals")
+    close_at_date = float(close_slice.iloc[-1])
+    market_cap_at_date: float | None = None
+    if qf is not None and qf.shares_outstanding and qf.shares_outstanding > 0:
+        market_cap_at_date = close_at_date * qf.shares_outstanding
+
+    # V/F: 분기 데이터 있으면 시점별 재구성, 없으면 backfill_skip
+    v = (
+        valuation_factor.calculate_at_date(
+            qf, as_of=as_of, close_at_date=close_at_date
+        )
+        if qf is not None
+        else backfill_skip("valuation")
+    )
+    f = (
+        fundamentals_factor.calculate_at_date(
+            qf, as_of=as_of, market_cap_at_date=market_cap_at_date
+        )
+        if qf is not None
+        else backfill_skip("fundamentals")
+    )
     t = technical_factor.calculate_at_close(
         close_slice, volume_slice, as_of=as_of, source="backfill"
     )
@@ -207,7 +238,7 @@ def _build_composite_at(
         verdict=_verdict(total),
         factors=factors,
         computed_at=now_utc(),
-        price_at_score=float(close_slice.iloc[-1]),
+        price_at_score=close_at_date,
         currency=currency,
         name=name,
         sector=sector,
