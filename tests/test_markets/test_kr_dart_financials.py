@@ -10,10 +10,13 @@ import pytest
 from stock_compass.markets._kr_dart_financials import (
     _annual_minus_quarters,
     _build_quarters,
-    _parse_finstate_df,
+    _parse_finstate_all_df,
     _ReprtData,
     fetch_kr_quarterly_via_dart,
 )
+# 기존 코드 호환 — _parse_finstate_df 는 _parse_finstate_all_df 로 대체됐지만
+# 이전 테스트 파일이 import 한다면 alias 제공 (현재는 같은 함수)
+_parse_finstate_df = _parse_finstate_all_df
 
 
 def _mk_df(rows: list[dict[str, str | float]]) -> pd.DataFrame:
@@ -22,17 +25,18 @@ def _mk_df(rows: list[dict[str, str | float]]) -> pd.DataFrame:
 
 
 class TestParseFinstateDf:
-    def test_cfs_preferred_over_ofs(self) -> None:
+    def test_account_id_row_preferred_over_nm_only_row(self) -> None:
+        # 두 row 모두 같은 account_nm 이지만 한 쪽만 IFRS account_id 있음
         df = _mk_df(
             [
                 {
-                    "fs_div": "OFS",
+                    "account_id": None,
                     "sj_div": "IS",
                     "account_nm": "매출액",
                     "thstrm_amount": "50,000,000,000",
                 },
                 {
-                    "fs_div": "CFS",
+                    "account_id": "ifrs-full_Revenue",
                     "sj_div": "IS",
                     "account_nm": "매출액",
                     "thstrm_amount": "100,000,000,000",
@@ -40,7 +44,7 @@ class TestParseFinstateDf:
             ]
         )
         d = _parse_finstate_df(df)
-        # CFS 연결 우선
+        # account_id 매핑 (1차 pass) 가 두번째 row 의 100B 잡음
         assert d.revenue == 100_000_000_000
 
     def test_all_four_accounts_parsed(self) -> None:
@@ -89,24 +93,56 @@ class TestParseFinstateDf:
         assert _parse_finstate_df(df).net_income == 1_000_000
 
     def test_falls_back_to_ofs_when_cfs_missing(self) -> None:
-        # CFS 없고 OFS만
+        # account_id 없고 account_nm fallback 만
         df = _mk_df(
             [
-                {"fs_div": "OFS", "sj_div": "IS", "account_nm": "매출액",
+                {"account_id": None, "sj_div": "IS", "account_nm": "매출액",
                  "thstrm_amount": "50,000,000,000"},
             ]
         )
         assert _parse_finstate_df(df).revenue == 50_000_000_000
 
+    def test_account_id_preferred_over_nm(self) -> None:
+        # account_id IFRS 표준이 우선 — nm 만 매핑된 값은 무시
+        df = _mk_df(
+            [
+                {"account_id": "ifrs-full_Revenue", "sj_div": "IS",
+                 "account_nm": "매출액", "thstrm_amount": "100,000,000,000"},
+            ]
+        )
+        assert _parse_finstate_df(df).revenue == 100_000_000_000
+
+    def test_operating_cashflow_extracted(self) -> None:
+        df = _mk_df(
+            [
+                {"account_id": "ifrs-full_CashFlowsFromUsedInOperatingActivities",
+                 "sj_div": "CF", "account_nm": "영업활동현금흐름",
+                 "thstrm_amount": "5,000,000,000"},
+            ]
+        )
+        assert _parse_finstate_df(df).operating_cashflow == 5_000_000_000
+
+    def test_operating_cashflow_nm_fallback(self) -> None:
+        # account_id 모르면 (sj_div=CF, account_nm) 매핑
+        df = _mk_df(
+            [
+                {"account_id": None, "sj_div": "CF",
+                 "account_nm": "영업활동현금흐름",
+                 "thstrm_amount": "3,000,000,000"},
+            ]
+        )
+        assert _parse_finstate_df(df).operating_cashflow == 3_000_000_000
+
 
 class TestBuildQuarters:
     def _mk_year(self, year: int) -> dict[tuple[int, str], _ReprtData]:
         # 1Q=100, Q2 단독=110, Q3 단독=120, 연간=500 → Q4 단독 = 500-100-110-120 = 170
+        # operating_cashflow: Q1=8, Q2=9, Q3=10, 연간=40 → Q4=40-8-9-10=13
         return {
-            (year, "11013"): _ReprtData(100.0, 20.0, 15.0, 1000.0),
-            (year, "11012"): _ReprtData(110.0, 22.0, 17.0, 1100.0),
-            (year, "11014"): _ReprtData(120.0, 25.0, 18.0, 1200.0),
-            (year, "11011"): _ReprtData(500.0, 100.0, 75.0, 1300.0),
+            (year, "11013"): _ReprtData(100.0, 20.0, 15.0, 1000.0, 8.0),
+            (year, "11012"): _ReprtData(110.0, 22.0, 17.0, 1100.0, 9.0),
+            (year, "11014"): _ReprtData(120.0, 25.0, 18.0, 1200.0, 10.0),
+            (year, "11011"): _ReprtData(500.0, 100.0, 75.0, 1300.0, 40.0),
         }
 
     def test_q1_q2_q3_use_single_amount(self) -> None:
@@ -117,6 +153,8 @@ class TestBuildQuarters:
         assert by_month[3].revenue == 100.0
         assert by_month[3].period_end == date(2024, 3, 31)
         assert by_month[3].publish_after == date(2024, 5, 15)
+        # 1Q operating_cashflow → free_cash_flow (proxy)
+        assert by_month[3].free_cash_flow == 8.0
         # 2Q 단독 (DART에서 이미 단독)
         assert by_month[6].revenue == 110.0
         assert by_month[6].publish_after == date(2024, 8, 14)
@@ -131,6 +169,8 @@ class TestBuildQuarters:
         assert by_month[12].revenue == 170.0
         # Q4 영업이익 = 100 - 20 - 22 - 25 = 33
         assert by_month[12].operating_income == 33.0
+        # Q4 영업CF (FCF proxy) = 40 - 8 - 9 - 10 = 13
+        assert by_month[12].free_cash_flow == 13.0
         # Q4 자본총계 = 시점값 (사업보고서 자본총계 1300 그대로)
         assert by_month[12].equity == 1300.0
         # publish_after = 다음해 3/31
