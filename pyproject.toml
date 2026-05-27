@@ -106,8 +106,19 @@ module = [
   "OpenDartReader.*",
   "pandas_market_calendars.*",
   "pandas.*",
+  "streamlit",
+  "streamlit.*",
+  "altair",
+  "altair.*",
 ]
 ignore_missing_imports = true
+
+# 대시보드 app 은 optional dep (streamlit/altair) — strict 검사 대신
+# 누락 import 무시 + 미타입 호출 허용 (streamlit/altair 자체가 타입 약함)
+[[tool.mypy.overrides]]
+module = ["stock_compass.dashboard.app"]
+disallow_untyped_calls = false
+disallow_untyped_defs = false
 
 # ──────────────── pytest ────────────────
 [tool.pytest.ini_options]
