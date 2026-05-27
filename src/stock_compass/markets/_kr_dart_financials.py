@@ -253,7 +253,13 @@ def _annual_minus_quarters(
 
 
 def _kr_shares_outstanding(code: str) -> float | None:
-    """pykrx 로 현재 상장주식수. 시점별 미지원 — 현재 값만."""
+    """현재 상장주식수. 시점별 미지원 — 현재 값만.
+
+    1순위: pykrx 시가총액 데이터 (상장주식수 컬럼)
+    2순위: yfinance .KS 심볼 .info.sharesOutstanding
+    둘 다 실패 시 None → Valuation backfill_skip.
+    """
+    # 1) pykrx 시도
     try:
         from pykrx.stock import (
             get_market_cap_by_ticker,
@@ -264,8 +270,20 @@ def _kr_shares_outstanding(code: str) -> float | None:
         df = get_market_cap_by_ticker(day)
         if code in df.index:
             return float(df.loc[code, "상장주식수"])
+    except (IndexError, KeyError, ValueError, OSError) as e:
+        _logger.debug("pykrx 상장주식수 조회 실패 — yfinance 시도: %s (%s)", code, e)
+
+    # 2) yfinance fallback (.KS 심볼)
+    try:
+        from stock_compass.markets.us import UsAdapter
+
+        info = UsAdapter()._fetch_info(f"{code}.KS")
+        shares = info.get("sharesOutstanding")
+        if shares:
+            return float(shares)
     except Exception as e:
-        _logger.debug("pykrx 상장주식수 조회 실패: %s (%s)", code, e)
+        _logger.debug("yfinance shares 조회 실패: %s (%s)", code, e)
+
     return None
 
 
