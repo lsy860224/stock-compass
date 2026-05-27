@@ -271,9 +271,9 @@ class KrAdapter(MarketAdapter):
                 save_json(cache_name, info)
         info = info or {}
 
-        # sector — yfinance 가 부정확/누락이면 DART KSIC → GICS 로 교정
-        yf_sector = _get(info, "sector", as_=str)
-        sector = yf_sector or _kr_sector_from_dart(code)
+        # sector — KR 종목은 DART KSIC → GICS 우선 (yfinance label "Technology"/
+        # "Consumer Cyclical" 같이 GICS 표준 아님). DART 실패 시 yfinance 폴백.
+        sector = _kr_sector_from_dart(code) or _get(info, "sector", as_=str)
 
         # pykrx로 PER/PBR 보강 (yfinance KR 누락 빈번)
         per = _get(info, "trailingPE", as_=float)
