@@ -319,3 +319,27 @@ ALTER TABLE news_summaries ADD COLUMN concerns TEXT NOT NULL DEFAULT '[]';
 """
 
 
+# 백테스트 결과 영구 저장 — dashboard history, 비교, audit 용도
+MIGRATION_006_BACKTEST_RESULTS = """
+CREATE TABLE IF NOT EXISTS backtest_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_at TEXT NOT NULL DEFAULT (datetime('now')),
+  preset_name TEXT,
+  sql_text TEXT NOT NULL,
+  start_date TEXT NOT NULL,
+  end_date TEXT NOT NULL,
+  rebalance TEXT NOT NULL,
+  forward_periods TEXT NOT NULL,  -- JSON 배열 (예: ["1m","3m"])
+  limit_per_round INTEGER NOT NULL,
+  rounds_count INTEGER NOT NULL,
+  total_picks INTEGER NOT NULL,
+  stats TEXT NOT NULL,  -- JSON {period: {avg, median, hit_rate, worst}}
+  rounds_summary TEXT  -- JSON [{as_of, picks, avg_returns_by_period}]
+);
+CREATE INDEX IF NOT EXISTS idx_backtest_results_run_at
+  ON backtest_results(run_at DESC);
+CREATE INDEX IF NOT EXISTS idx_backtest_results_preset
+  ON backtest_results(preset_name, run_at DESC);
+"""
+
+

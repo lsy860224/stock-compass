@@ -596,6 +596,20 @@ def backtest(
     limit: Annotated[
         int, typer.Option("--limit", help="라운드별 종목 수 상한 (기본 15)")
     ] = 15,
+    save: Annotated[
+        bool,
+        typer.Option(
+            "--save/--no-save",
+            help="DB(backtest_results)에 저장 (기본 ON — dashboard history)",
+        ),
+    ] = True,
+    publish_craft: Annotated[
+        bool,
+        typer.Option(
+            "--publish-craft",
+            help="결과를 Craft 노트로 발행 (CRAFT_API_TOKEN 필요)",
+        ),
+    ] = False,
 ) -> None:
     """Phase 7-5 백테스트 — preset SQL x 시점별 forward return 통계.
 
@@ -663,6 +677,60 @@ def backtest(
         raise typer.Exit(code=2) from e
 
     _render_backtest(result)
+
+    if save:
+        from stock_compass.db import get_db_connection, save_backtest_result
+
+        with get_db_connection() as conn:
+            row_id = save_backtest_result(conn, result, limit_per_round=limit)
+        console.print(
+            f"[dim]✓ backtest_results 저장 (id={row_id})[/dim]"
+        )
+
+    if publish_craft:
+        _publish_backtest_to_craft(result)
+
+
+def _publish_backtest_to_craft(result: BacktestResult) -> None:
+    """Craft 노트로 발행 — Stock-compass 폴더 (settings.craft_daily_folder_id)."""
+    from stock_compass.config import settings
+
+    if settings.craft_api_token is None:
+        console.print(
+            "[yellow]--publish-craft 무시: CRAFT_API_TOKEN 미설정[/yellow]"
+        )
+        return
+
+    from stock_compass.output.backtest_md import render_backtest_note
+    from stock_compass.output.craft import (
+        CraftAPIError,
+        CraftAuthError,
+        CraftPublisher,
+    )
+    from stock_compass.utils.dates import today_kst
+
+    publisher = CraftPublisher()
+    note_kind = f"backtest:{result.preset_name or 'inline'}:{result.start}~{result.end}"
+    title = (
+        f"백테스트 · {result.preset_name or 'inline'} · "
+        f"{result.start} ~ {result.end}"
+    )
+    body = render_backtest_note(result)
+    try:
+        r = publisher.publish_daily_note(
+            body,
+            today_kst(),
+            note_kind=note_kind,
+            title=title,
+        )
+        action = "갱신" if r.is_update else "발행"
+        console.print(
+            f"[green]✓ Craft {action}:[/green] [cyan]{r.url}[/cyan]"
+        )
+    except CraftAuthError as e:
+        console.print(f"[yellow]Craft 인증 실패: {e}[/yellow]")
+    except CraftAPIError as e:
+        console.print(f"[red]Craft API 오류: {e}[/red]")
 
 
 def _render_backtest(result: BacktestResult) -> None:
