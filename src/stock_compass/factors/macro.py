@@ -17,7 +17,7 @@ from typing import Any
 
 from stock_compass.config import settings
 from stock_compass.factors.base import DEFAULT_WEIGHTS, FactorScore, neutral
-from stock_compass.markets.base import MarketAdapter
+from stock_compass.markets.base import Market, MarketAdapter
 from stock_compass.utils.cache import load_json, save_json
 from stock_compass.utils.logging import get_logger
 from stock_compass.utils.retry import external_call_retry
@@ -238,6 +238,72 @@ def _score_usdkrw_combined(point: FredSeriesPoint) -> float | None:
     )
 
 
+@external_call_retry
+def fetch_full_series(series_id: str) -> Any:
+    """FRED 시계열 전체 (pandas Series) — backfill 용. 실패 시 빈 Series.
+
+    `_fetch_series_fred` 가 latest+ma_90 만 캐시하는 것과 달리, backfill 은
+    매 시점 ma_90 계산을 위해 시계열 자체가 필요.
+    """
+    import pandas as pd
+
+    try:
+        return _fred_client().get_series(series_id).dropna()
+    except (ConnectionError, TimeoutError, ValueError, OSError) as e:
+        _logger.warning("FRED 전체 시계열 호출 실패: %s (%s)", series_id, e)
+        return pd.Series(dtype=float)
+
+
+def _point_at_date(series: Any, as_of: Any) -> FredSeriesPoint:
+    """시계열에서 `as_of` 이하 마지막 값 + 그 시점까지의 90일 평균.
+
+    `as_of` 다음날 데이터는 사용 안 함 (look-ahead 차단).
+    series 빈 또는 as_of 이전 데이터 없으면 _EMPTY_POINT.
+    """
+    if series is None or len(series) == 0:
+        return _EMPTY_POINT
+    # pandas Series: index 가 datetime — as_of 이하 slice
+    # Pandas 4.0+: date 객체 직접 슬라이싱 deprecated → Timestamp 변환
+    import pandas as pd
+
+    as_of_ts = pd.Timestamp(as_of)
+    sliced = series.loc[:as_of_ts]
+    if sliced.empty:
+        return _EMPTY_POINT
+    latest = float(sliced.iloc[-1])
+    recent = sliced.iloc[-_MA_WINDOW:]
+    ma_90: float | None = float(recent.mean()) if not recent.empty else None
+    trend_pct: float | None = (
+        (latest - ma_90) / ma_90 * 100
+        if ma_90 is not None and ma_90 != 0
+        else None
+    )
+    return FredSeriesPoint(latest=latest, ma_90=ma_90, trend_pct=trend_pct)
+
+
+def calculate_at_date(
+    market: Market,
+    series_cache: dict[str, Any],
+    as_of: Any,
+) -> FactorScore:
+    """백필용 시점별 Macro 점수 — 미리 fetch한 FRED 시계열에서 시점 slice.
+
+    `series_cache`: {series_id: pandas.Series} — `fetch_full_series` 결과.
+    백필 엔진이 모든 시리즈를 한 번만 fetch하고 모든 시점에 재사용 (효율적).
+    """
+    vix_p = _point_at_date(series_cache.get("VIXCLS"), as_of)
+    spread_p = _point_at_date(series_cache.get("T10Y2Y"), as_of)
+    dgs10_p = _point_at_date(series_cache.get("DGS10"), as_of)
+    usdkrw_p = (
+        _point_at_date(series_cache.get("DEXKOUS"), as_of)
+        if market == "KR"
+        else _EMPTY_POINT
+    )
+    return _aggregate_macro(
+        market, vix_p, spread_p, dgs10_p, usdkrw_p, source="backfill"
+    )
+
+
 def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
     _ = ticker
     market = adapter.market
@@ -245,7 +311,18 @@ def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
     spread_p = _series("T10Y2Y")
     dgs10_p = _series("DGS10")
     usdkrw_p = _series("DEXKOUS") if market == "KR" else _EMPTY_POINT
+    return _aggregate_macro(market, vix_p, spread_p, dgs10_p, usdkrw_p, source="fred")
 
+
+def _aggregate_macro(
+    market: Market,
+    vix_p: FredSeriesPoint,
+    spread_p: FredSeriesPoint,
+    dgs10_p: FredSeriesPoint,
+    usdkrw_p: FredSeriesPoint,
+    *,
+    source: str,
+) -> FactorScore:
     s_vix = _score_vix_combined(vix_p)
     s_spread = _score_spread_combined(spread_p)
     s_dgs10 = _score_dgs10_combined(dgs10_p)
@@ -305,5 +382,5 @@ def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
             f"FRED {len(valid)}개 시리즈 (시장={market}, "
             f"abs+trend 블렌딩 — 90일 평균 대비)"
         ),
-        source="fred",
+        source=source,
     )
