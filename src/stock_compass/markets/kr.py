@@ -15,6 +15,7 @@ from stock_compass.markets.base import (
     MarketAdapter,
     News,
     PriceHistory,
+    QuarterlyFinancials,
 )
 from stock_compass.markets.us import UsAdapter, _get, _parse_news_time
 from stock_compass.utils.cache import (
@@ -353,6 +354,18 @@ class KrAdapter(MarketAdapter):
 
     # ─── Naver 뉴스 ───
     # 정의는 클래스 밖 헬퍼로 — _kr_name(code) lookup 의존성 분리
+
+    # ─── 분기 재무 (백필용) — yfinance 위임 ───
+
+    def get_quarterly_financials(self, ticker: str) -> QuarterlyFinancials:
+        """KR 종목 분기 재무 — yfinance .KS/.KQ 심볼로 위임.
+
+        KR yfinance financials 데이터 가용성은 종목별 편차 큼 (시총 큰 종목 위주).
+        """
+        code = self._normalize_code(ticker)
+        return UsAdapter().get_quarterly_financials(code).model_copy(
+            update={"ticker": code, "market": "KR"}
+        )
 
     # ─── disclosures (DART) ───
 

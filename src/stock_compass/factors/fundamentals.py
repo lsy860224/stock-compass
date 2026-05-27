@@ -6,12 +6,23 @@ fallback. 같은 (market, sector) median은 process-level dict 캐시.
 
 각 component는 *높을수록 좋은* 방향 → ratio는 valuation 의 반대 (큰 ratio
 가 높은 점수). negative value는 항상 absolute fallback (sector ratio 무의미).
+
+`calculate_at_date(qf, ...)`: 백필용 시점별 ROE/op_margin/revenue_growth 재구성
+(TTM 4분기 합산).
 """
 
 from __future__ import annotations
 
-from stock_compass.factors.base import DEFAULT_WEIGHTS, FactorScore, neutral
-from stock_compass.markets.base import Market, MarketAdapter
+from datetime import date as date_cls
+
+from stock_compass.factors._fundamentals_history import metrics_at
+from stock_compass.factors.base import (
+    DEFAULT_WEIGHTS,
+    FactorScore,
+    backfill_skip,
+    neutral,
+)
+from stock_compass.markets.base import Market, MarketAdapter, QuarterlyFinancials
 
 
 def _score_revenue_growth(g: float | None) -> float | None:
@@ -147,6 +158,76 @@ def _get_sector_fundamental_medians(
 def clear_sector_medians_cache() -> None:
     """테스트 또는 batch 재실행 시 stale 데이터 제거."""
     _FUND_MEDIANS_CACHE.clear()
+
+
+def calculate_at_date(
+    qf: QuarterlyFinancials | None,
+    *,
+    as_of: date_cls,
+    market_cap_at_date: float | None = None,
+) -> FactorScore:
+    """백필용 시점별 Fundamentals — TTM 기반 revenue_growth/op_margin/ROE/earnings_growth.
+
+    FCF yield 는 시점별 market_cap 이 필요 (close x shares_outstanding) — 호출자가
+    `market_cap_at_date` 주입 시 산출, 아니면 component 제외.
+    데이터 부족 시 backfill_skip ('fundamentals').
+    """
+    if qf is None or qf.is_empty():
+        return backfill_skip("fundamentals")
+
+    m = metrics_at(qf, as_of)
+    if not m:
+        return backfill_skip("fundamentals")
+
+    revenue_growth = m.get("revenue_growth_yoy")
+    earnings_growth = m.get("earnings_growth_yoy")
+    operating_margin = m.get("operating_margin")
+    roe = m.get("roe")
+    fcf_ttm = m.get("fcf_ttm")
+    fcf_yield = (
+        fcf_ttm / market_cap_at_date
+        if fcf_ttm is not None
+        and market_cap_at_date is not None
+        and market_cap_at_date > 0
+        else None
+    )
+
+    components: dict[str, float] = {}
+    if (s := _score_revenue_growth(revenue_growth)) is not None:
+        components["revenue_growth_yoy"] = s
+    if (s := _score_earnings_growth(earnings_growth)) is not None:
+        components["earnings_growth_yoy"] = s
+    if (s := _score_roe(roe)) is not None:
+        components["roe"] = s
+    if (s := _score_op_margin(operating_margin)) is not None:
+        components["operating_margin"] = s
+    if fcf_yield is not None and (
+        s := _score_fcf_yield(fcf_ttm, market_cap_at_date)
+    ) is not None:
+        components["fcf_yield"] = s
+
+    if not components:
+        return backfill_skip("fundamentals")
+
+    score = sum(components.values()) / len(components)
+    return FactorScore(
+        name="fundamentals",
+        score=round(score, 2),
+        weight=DEFAULT_WEIGHTS["fundamentals"],
+        raw_values={
+            "revenue_growth_yoy": revenue_growth,
+            "earnings_growth_yoy": earnings_growth,
+            "roe": roe,
+            "operating_margin": operating_margin,
+            "fcf_yield": fcf_yield,
+            "revenue_ttm": m.get("revenue_ttm"),
+            "ni_ttm": m.get("ni_ttm"),
+            "equity_avg": m.get("equity_avg"),
+            "component_scores": components,
+        },
+        note=f"[backfill 시점별] TTM 기반 ({len(components)} 지표)",
+        source="backfill_reconstructed",
+    )
 
 
 # ──────────────────────── 진입점 ────────────────────────

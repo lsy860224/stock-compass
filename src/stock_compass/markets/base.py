@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import date as date_cls
 from datetime import datetime, time
 from typing import Literal
 
@@ -60,6 +61,38 @@ class Fundamentals(BaseModel):
     source: str = "yfinance"
 
 
+class QuarterlyDatum(BaseModel):
+    """단일 분기 재무 데이터 — 백필용 시점별 PER/PBR/ROE 재구성에 사용.
+
+    `publish_after`: 분기 종료일 + 45일 (보수적 공시 lag 추정). 시점 `t < publish_after`
+    에서는 이 분기 데이터를 사용해서는 안 됨 (look-ahead 차단).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    period_end: date_cls
+    publish_after: date_cls
+    revenue: float | None = None
+    operating_income: float | None = None
+    net_income: float | None = None
+    free_cash_flow: float | None = None
+    equity: float | None = None
+
+
+class QuarterlyFinancials(BaseModel):
+    """한 종목의 최근 N분기 재무 시계열 (최신 → 과거 순)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    ticker: str
+    market: Market
+    quarters: list[QuarterlyDatum] = Field(default_factory=list)
+    shares_outstanding: float | None = None  # 현재 값 (시점별 미지원)
+
+    def is_empty(self) -> bool:
+        return not self.quarters
+
+
 class News(BaseModel):
     title: str
     url: str
@@ -107,6 +140,14 @@ class MarketAdapter(ABC):
     @abstractmethod
     def get_disclosures(self, ticker: str, *, days: int = 30) -> list[Disclosure]:
         """KR 공시 (US 구현체는 [] 반환)."""
+
+    def get_quarterly_financials(self, ticker: str) -> QuarterlyFinancials:
+        """분기 재무 시계열 — 백필 V/F 재구성용. 미구현 어댑터는 빈 객체.
+
+        ABC가 아닌 일반 메서드 (default 빈 반환) — 어댑터별 선택적 구현.
+        """
+        _ = ticker
+        return QuarterlyFinancials(ticker="", market=self.market, quarters=[])
 
     @abstractmethod
     def get_trading_hours(self) -> tuple[time, time]:

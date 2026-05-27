@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 
 from stock_compass.markets.base import (
@@ -14,6 +14,8 @@ from stock_compass.markets.base import (
     MarketAdapter,
     News,
     PriceHistory,
+    QuarterlyDatum,
+    QuarterlyFinancials,
 )
 from stock_compass.utils.cache import (
     cache_key_for_today,
@@ -186,6 +188,133 @@ class UsAdapter(MarketAdapter):
     def get_disclosures(self, ticker: str, *, days: int = 30) -> list[Disclosure]:
         _ = (ticker, days)
         return []
+
+    # ─── 분기 재무 (백필용) ───
+
+    def get_quarterly_financials(self, ticker: str) -> QuarterlyFinancials:
+        """yfinance 분기 손익+대차+현금 → QuarterlyFinancials. 24h 캐시.
+
+        실패 시 빈 객체. 공시 lag 45일 추정 (period_end + 45d → publish_after).
+        """
+        symbol = self.to_yfinance_symbol(ticker)
+        cache_name = f"qfin-{cache_key_for_today(symbol)}"
+        cached = load_json(cache_name, _HISTORY_TTL)
+        if isinstance(cached, dict) and cached.get("quarters") is not None:
+            try:
+                return QuarterlyFinancials.model_validate(cached)
+            except Exception:
+                pass
+
+        qf = self._fetch_quarterly(symbol, ticker)
+        if not qf.is_empty():
+            save_json(cache_name, qf.model_dump(mode="json"))
+        return qf
+
+    @external_call_retry
+    def _fetch_quarterly(self, symbol: str, ticker: str) -> QuarterlyFinancials:
+        import yfinance as yf
+
+        try:
+            t = yf.Ticker(symbol)
+            income = _safe_df(t, "quarterly_income_stmt", "quarterly_financials")
+            balance = _safe_df(t, "quarterly_balance_sheet")
+            cashflow = _safe_df(t, "quarterly_cashflow")
+            info = t.info or {}
+        except (KeyError, ValueError, AttributeError, OSError) as e:
+            _logger.warning("yfinance 분기 fetch 실패: %s (%s)", symbol, e)
+            return QuarterlyFinancials(ticker=ticker, market=self.market)
+
+        # 분기 종료일 = 컬럼 (income/balance/cashflow 공통 — 일부 불일치 있을 수 있음)
+        period_ends: set[Any] = set()
+        for df in (income, balance, cashflow):
+            if df is not None and not df.empty:
+                period_ends.update(df.columns.tolist())
+        if not period_ends:
+            return QuarterlyFinancials(ticker=ticker, market=self.market)
+        sorted_ends = sorted(period_ends, reverse=True)
+
+        quarters: list[QuarterlyDatum] = []
+        for col in sorted_ends:
+            period_end = _to_date(col)
+            if period_end is None:
+                continue
+            quarters.append(
+                QuarterlyDatum(
+                    period_end=period_end,
+                    publish_after=period_end + timedelta(days=45),
+                    revenue=_row_value(income, "Total Revenue", col),
+                    operating_income=_row_value(income, "Operating Income", col),
+                    net_income=_row_value(income, "Net Income", col),
+                    free_cash_flow=_row_value(cashflow, "Free Cash Flow", col),
+                    equity=_row_value(balance, "Stockholders Equity", col),
+                )
+            )
+
+        shares = _get(info, "sharesOutstanding", "impliedSharesOutstanding", as_=float)
+        return QuarterlyFinancials(
+            ticker=ticker,
+            market=self.market,
+            quarters=quarters,
+            shares_outstanding=shares,
+        )
+
+
+def _safe_df(ticker: Any, *attrs: str) -> Any:
+    """yfinance Ticker 의 분기 dataframe 속성 — 첫 비어있지 않은 결과. 없으면 None."""
+    for attr in attrs:
+        try:
+            df = getattr(ticker, attr, None)
+        except (KeyError, ValueError, AttributeError, OSError):
+            continue
+        if df is not None and not df.empty:
+            return df
+    return None
+
+
+def _to_date(col: Any) -> date | None:
+    """pandas Timestamp 또는 str 을 date 로."""
+    try:
+        if hasattr(col, "date"):
+            return col.date()  # type: ignore[no-any-return]
+        if isinstance(col, str):
+            return datetime.fromisoformat(col.split(" ")[0]).date()
+    except (ValueError, AttributeError):
+        return None
+    return None
+
+
+def _row_value(df: Any, row_name: str, col: Any) -> float | None:
+    """yfinance 분기 df 에서 [row_name, col] 값. 누락·NaN 시 None.
+
+    row_name 변종 (예: 'Total Revenue' vs 'TotalRevenue' vs 'Revenue') 도 시도.
+    """
+    if df is None or df.empty:
+        return None
+    variants = [row_name, row_name.replace(" ", "")]
+    # 추가 별칭
+    aliases = {
+        "Total Revenue": ["TotalRevenue", "Revenue"],
+        "Operating Income": ["OperatingIncome"],
+        "Net Income": ["NetIncome"],
+        "Free Cash Flow": ["FreeCashFlow"],
+        "Stockholders Equity": [
+            "StockholdersEquity",
+            "Total Stockholder Equity",
+            "TotalStockholderEquity",
+            "Common Stock Equity",
+        ],
+    }
+    variants.extend(aliases.get(row_name, []))
+    for name in variants:
+        if name in df.index:
+            v = df.loc[name, col]
+            if v is None or (isinstance(v, float) and math.isnan(v)):
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 def _get[T](d: Mapping[str, Any], *keys: str, as_: Callable[[Any], T]) -> T | None:
