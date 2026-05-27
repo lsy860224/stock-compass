@@ -426,6 +426,12 @@ def weekly_discover(
 
         total_found += result.row_count
         sections.append(f"\n## 🔍 {name} — {result.row_count}건")
+
+        # 모델 신뢰도 검증 — 지난 1년 backtest 적중률 + 평균 수익률 한 줄
+        bt_line = _preset_backtest_line(sql, name)
+        if bt_line:
+            sections.append(bt_line)
+
         if not result.rows:
             sections.append("\n조건 충족 종목 없음.")
             continue
@@ -469,6 +475,67 @@ def weekly_discover(
             console.print(f"[yellow]Craft 인증 실패: {e}[/yellow]")
         except CraftAPIError as e:
             console.print(f"[red]Craft API 오류: {e}[/red]")
+
+
+def _preset_backtest_line(preset_sql: str, preset_name: str) -> str | None:
+    """preset SQL에 대해 지난 1년 monthly backtest → 3m 적중률·평균 수익률 한 줄.
+
+    Craft 노트의 preset 섹션에 "_과거 검증_ 적중률 X%, 평균 +Y%" 추가.
+    백테스트는 v_at_date(:as_of) 필요 → v_latest_scores를 자동 치환 시도.
+    데이터 부족/실행 실패 시 None 반환 (섹션에 안 추가).
+    """
+    import re
+    from datetime import timedelta
+
+    from stock_compass.screener.backtest import BacktestError, run_backtest
+    from stock_compass.screener.engine import ScreenerError
+    from stock_compass.utils.dates import today_kst
+    from stock_compass.utils.logging import get_logger
+
+    logger = get_logger(__name__)
+
+    # v_latest_scores → v_at_date(:as_of) 자동 변환 (이미 :as_of 또는 v_at_date 있으면 그대로)
+    if ":as_of" in preset_sql or re.search(
+        r"v_at_date\(", preset_sql, re.IGNORECASE
+    ):
+        bt_sql = preset_sql
+    else:
+        bt_sql = re.sub(
+            r"\bv_latest_scores\b",
+            "v_at_date(:as_of)",
+            preset_sql,
+            flags=re.IGNORECASE,
+        )
+        if bt_sql == preset_sql:
+            return None  # 변환 대상 없음
+
+    end_d = today_kst() - timedelta(days=7)  # 직전 주까지 (당주 데이터 부족)
+    start_d = end_d - timedelta(days=365)
+
+    try:
+        result = run_backtest(
+            bt_sql,
+            start=start_d,
+            end=end_d,
+            rebalance="monthly",
+            forward_periods=("3m",),
+            limit=10,
+            preset_name=f"weekly-verify:{preset_name}",
+        )
+    except (BacktestError, ScreenerError) as e:
+        logger.debug("weekly backtest %s 실패 — 노트에 생략: %s", preset_name, e)
+        return None
+
+    avg = result.stats.avg_return.get("3m")
+    hit = result.stats.hit_rate.get("3m")
+    if avg is None or hit is None:
+        return None
+    avg_sign = "+" if avg >= 0 else ""
+    return (
+        f"\n_과거 1년 검증 (monthly, 3m forward, {result.stats.rounds_count} 라운드):_ "
+        f"**적중률 {hit * 100:.0f}%**, 평균 {avg_sign}{avg * 100:.1f}% "
+        f"_(총 {result.stats.total_picks}건 선정)_"
+    )
 
 
 def _format_md_cell(v: object) -> str:
