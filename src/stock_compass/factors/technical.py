@@ -1,4 +1,4 @@
-"""Technical 팩터 — RSI(14), 200MA 이격률, 거래량 z-score."""
+"""Technical 팩터 — RSI(14), 200MA 이격률, 거래량 z-score (+ backfill at-time)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from stock_compass.factors.base import DEFAULT_WEIGHTS, FactorScore, neutral
 from stock_compass.markets.base import MarketAdapter
 
 if TYPE_CHECKING:
+    from datetime import date as date_cls
+
     import pandas as pd
 
 
@@ -132,7 +134,32 @@ def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
 
     close = hist.df["close"]
     volume = hist.df["volume"]
+    return _calculate_from_series(close, volume, source=hist.source)
 
+
+def calculate_at_close(
+    close: pd.Series,
+    volume: pd.Series,
+    *,
+    as_of: date_cls,
+    source: str = "backfill",
+) -> FactorScore:
+    """백필용 시점별 Technical 점수.
+
+    close/volume 은 호출자가 미리 `index <= as_of` 로 slice 한 상태여야 함.
+    last_close 는 series 의 마지막 값 자동 사용 (그 시점 종가).
+    `source="backfill"` 로 표시되어 사용자가 실시간 vs 백필 구분 가능.
+    """
+    _ = as_of  # 호출자가 slice 책임 — 여기선 메타 표시 용도
+    if close.empty:
+        return neutral("technical", f"가격 데이터 없음 (as_of={as_of})")
+    return _calculate_from_series(close, volume, source=source)
+
+
+def _calculate_from_series(
+    close: pd.Series, volume: pd.Series, *, source: str
+) -> FactorScore:
+    """OHLCV close/volume series 에서 Technical 4 지표 + 점수 산출 — 공통 로직."""
     rsi = rsi_14(close)
     dist = ma200_distance(close)
     z = volume_zscore(volume)
@@ -168,5 +195,5 @@ def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
             "component_scores": components,
         },
         note=f"사용 지표 {len(components)}개: {', '.join(components)}",
-        source=hist.source,
+        source=source,
     )

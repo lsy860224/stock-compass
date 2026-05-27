@@ -42,3 +42,18 @@ def neutral(name: FactorName, note: str, raw: dict[str, Any] | None = None) -> F
         note=note,
         source="fallback",
     )
+
+
+def backfill_skip(name: FactorName) -> FactorScore:
+    """백필 모드 — 시점별 재구성 불가능한 팩터 (valuation/fundamentals/sentiment)
+    는 50점 baseline 으로 명시 skip. source 가 'backfill_skip' 이라 사용자가
+    백필 결과 해석 시 인지 가능 (Technical+Macro 만 실제 시점 데이터).
+    """
+    return FactorScore(
+        name=name,
+        score=50.0,
+        weight=DEFAULT_WEIGHTS[name],
+        raw_values={"backfill": True, "note": "시점별 재구성 불가 — neutral 50"},
+        note="[backfill skip] 시점별 데이터 부족 — neutral 50",
+        source="backfill_skip",
+    )

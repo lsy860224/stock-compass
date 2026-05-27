@@ -5,6 +5,7 @@
 
 from stock_compass.commands import (  # noqa: F401 — 등록 트리거
     alerts,
+    backfill,
     dashboard,
     news,
     report,
