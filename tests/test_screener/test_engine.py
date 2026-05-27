@@ -35,6 +35,7 @@ def _seed_score(
     *,
     market: str = "US",
     price: float = 200.0,
+    on_date: date = date(2026, 5, 22),
 ) -> None:
     """v_latest_scores 조회용 최소 시드. price는 composite_scores.price_at_score로 저장."""
     factors = [
@@ -68,7 +69,7 @@ def _seed_score(
     with sqlite3.connect(db, isolation_level=None) as c:
         c.row_factory = sqlite3.Row
         c.execute("PRAGMA foreign_keys = ON")
-        upsert_composite_score(c, score, on_date=date(2026, 5, 22))
+        upsert_composite_score(c, score, on_date=on_date)
 
 
 class TestSafetyValidation:
@@ -157,9 +158,39 @@ class TestAtDate:
         with pytest.raises(ScreenerError, match="일자 형식"):
             ScreenerEngine().run_sql("SELECT * FROM v_at_date('2026-13-99')")
 
-    def test_v_at_date_phase_75_stub(self, db_path: Path) -> None:
-        with pytest.raises(ScreenerError, match="Phase 7-5"):
-            ScreenerEngine().run_sql("SELECT * FROM v_at_date('2026-05-22')")
+    def test_v_at_date_returns_snapshot_at_date(self, db_path: Path) -> None:
+        # 5/22에 AAPL=65, 5/23에 AAPL=80 시드 — v_at_date('2026-05-22')는 5/22의 65
+        _seed_score(db_path, "AAPL", 65.0, on_date=date(2026, 5, 22))
+        _seed_score(db_path, "AAPL", 80.0, on_date=date(2026, 5, 23))
+        result = ScreenerEngine().run_sql(
+            "SELECT code, composite_score FROM v_at_date('2026-05-22')"
+        )
+        assert result.rows == [{"code": "AAPL", "composite_score": 65.0}]
+
+    def test_v_at_date_excludes_future_data(self, db_path: Path) -> None:
+        # 5/25에만 시드 → v_at_date('2026-05-22')는 빈 결과 (look-ahead 차단)
+        _seed_score(db_path, "AAPL", 75.0, on_date=date(2026, 5, 25))
+        result = ScreenerEngine().run_sql(
+            "SELECT code FROM v_at_date('2026-05-22')"
+        )
+        assert result.rows == []
+
+    def test_v_at_date_with_filter(self, db_path: Path) -> None:
+        # 백테스트 사용 패턴 — v_at_date + WHERE 점수 필터
+        _seed_score(db_path, "HIGH", 80.0, on_date=date(2026, 5, 22))
+        _seed_score(db_path, "LOW", 45.0, on_date=date(2026, 5, 22))
+        result = ScreenerEngine().run_sql(
+            "SELECT code, composite_score FROM v_at_date('2026-05-22') "
+            "WHERE composite_score >= 70 ORDER BY composite_score DESC"
+        )
+        codes = [r["code"] for r in result.rows]
+        assert codes == ["HIGH"]
+
+    def test_v_at_date_outer_with_rejected(self, db_path: Path) -> None:
+        with pytest.raises(ScreenerError, match="outer WITH"):
+            ScreenerEngine().run_sql(
+                "WITH foo AS (SELECT 1) SELECT * FROM v_at_date('2026-05-22')"
+            )
 
 
 class TestViewQueries:

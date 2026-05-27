@@ -144,6 +144,11 @@ class ScreenerEngine:
             )
 
     def _expand_v_at_date(self, sql: str) -> str:
+        """`v_at_date('YYYY-MM-DD')` 표현을 시점 스냅샷 CTE(`_vad`)로 inline 치환.
+
+        사용자 SQL에 outer WITH 가 이미 있으면 충돌하므로 거부 (현재 v1).
+        backtest 엔진은 단순 SELECT preset 만 호출 → 제약 OK.
+        """
         m = _AT_DATE.search(sql)
         if not m:
             return sql
@@ -154,11 +159,19 @@ class ScreenerEngine:
             raise ScreenerError(f"v_at_date 일자 형식 오류: {target}") from e
         if target_date > today_kst():
             raise ScreenerError(f"v_at_date — 미래 날짜 차단: {target}")
-        # Phase 7-5 백테스트 진입점 — 현재는 미구현
-        raise ScreenerError(
-            "v_at_date()는 Phase 7-5 백테스트에서 구현 예정 "
-            "(현재는 v_latest_scores만 사용 가능)"
-        )
+
+        # v_at_date('...') 모든 등장을 _vad 로 치환
+        rewritten = _AT_DATE.sub("_vad", sql)
+        if re.match(r"^\s*WITH\s+", rewritten, re.IGNORECASE):
+            # 사용자 WITH 와 우리 CTE 평면 결합 — v1: 거부 (preset SQL 단순화 강제)
+            raise ScreenerError(
+                "v_at_date()와 outer WITH 절을 동시에 사용할 수 없습니다. "
+                "preset SQL을 단순 SELECT 로 작성하세요."
+            )
+        from stock_compass.screener.views import build_v_at_date_ctes
+
+        ctes = build_v_at_date_ctes(target_date)
+        return f"WITH {ctes}\n{rewritten}"
 
     def _target_limit(self, requested: int | None) -> int:
         if requested is None:
