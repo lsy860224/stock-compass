@@ -286,12 +286,13 @@ def _to_date(col: Any) -> date | None:
 def _row_value(df: Any, row_name: str, col: Any) -> float | None:
     """yfinance 분기 df 에서 [row_name, col] 값. 누락·NaN 시 None.
 
+    income/balance/cashflow 가 서로 다른 분기 종료일을 보일 수 있어 합집합
+    col 이 특정 df 에 없을 수 있음 → 그 경우도 None (KeyError 방지).
     row_name 변종 (예: 'Total Revenue' vs 'TotalRevenue' vs 'Revenue') 도 시도.
     """
-    if df is None or df.empty:
+    if df is None or df.empty or col not in df.columns:
         return None
     variants = [row_name, row_name.replace(" ", "")]
-    # 추가 별칭
     aliases = {
         "Total Revenue": ["TotalRevenue", "Revenue"],
         "Operating Income": ["OperatingIncome"],
@@ -307,7 +308,10 @@ def _row_value(df: Any, row_name: str, col: Any) -> float | None:
     variants.extend(aliases.get(row_name, []))
     for name in variants:
         if name in df.index:
-            v = df.loc[name, col]
+            try:
+                v = df.loc[name, col]
+            except KeyError:
+                return None
             if v is None or (isinstance(v, float) and math.isnan(v)):
                 return None
             try:
