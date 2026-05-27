@@ -45,6 +45,8 @@ class Fundamentals(BaseModel):
     forward_per: float | None = None
     pbr: float | None = None
     peg: float | None = None
+    psr: float | None = Field(default=None, description="Price-to-Sales TTM")
+    ev_ebitda: float | None = Field(default=None, description="EV / EBITDA")
     dividend_yield: float | None = None
     roe: float | None = Field(default=None, description="0~1 scale (yfinance 기본)")
     revenue_growth_yoy: float | None = Field(default=None, description="0.15 = +15%")

@@ -389,7 +389,10 @@ def get_sector_valuation_medians(
         SELECT
           json_extract(fs.raw_values, '$.per') AS per,
           json_extract(fs.raw_values, '$.pbr') AS pbr,
-          json_extract(fs.raw_values, '$.peg') AS peg
+          json_extract(fs.raw_values, '$.peg') AS peg,
+          json_extract(fs.raw_values, '$.psr') AS psr,
+          json_extract(fs.raw_values, '$.ev_ebitda') AS ev_ebitda,
+          json_extract(fs.raw_values, '$.p_fcf') AS p_fcf
         FROM factor_scores fs
         JOIN tickers t ON t.id = fs.ticker_id
         WHERE t.market = ? AND t.sector = ?
@@ -414,6 +417,13 @@ def get_sector_valuation_medians(
         "per": _median([float(r["per"]) for r in rows if r["per"] is not None]),
         "pbr": _median([float(r["pbr"]) for r in rows if r["pbr"] is not None]),
         "peg": _median([float(r["peg"]) for r in rows if r["peg"] is not None]),
+        "psr": _median([float(r["psr"]) for r in rows if r["psr"] is not None]),
+        "ev_ebitda": _median(
+            [float(r["ev_ebitda"]) for r in rows if r["ev_ebitda"] is not None]
+        ),
+        "p_fcf": _median(
+            [float(r["p_fcf"]) for r in rows if r["p_fcf"] is not None]
+        ),
     }
 
 
