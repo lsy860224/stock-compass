@@ -45,18 +45,24 @@ from stock_compass.db.tickers import (
     upsert_ticker,
 )
 from stock_compass.db.trades import (
+    DEFAULT_HINDSIGHT_DAYS,
     Trade,
+    TradeWithHindsight,
     get_performance_summary,
+    get_trade_hindsight,
     get_trades,
     insert_trade,
+    summarize_hindsight,
 )
 
 __all__ = [
+    "DEFAULT_HINDSIGHT_DAYS",
     "MIGRATIONS",
     "AlertRow",
     "HistoryRow",
     "NewsSummaryRow",
     "Trade",
+    "TradeWithHindsight",
     "get_cached_news_summary",
     "get_db_connection",
     "get_last_score",
@@ -73,6 +79,7 @@ __all__ = [
     "get_sector_valuation_medians",
     "get_ticker_id",
     "get_today_token_usage",
+    "get_trade_hindsight",
     "get_trades",
     "has_daily_alert_today",
     "has_recent_alert",
@@ -80,6 +87,7 @@ __all__ = [
     "migrate",
     "record_alert",
     "record_token_usage",
+    "summarize_hindsight",
     "upsert_composite_score",
     "upsert_news_summary",
     "upsert_ticker",
