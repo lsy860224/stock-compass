@@ -1,12 +1,16 @@
 """Macro 팩터 — FRED VIX·10Y·장단기 스프레드 + KR 종목 시 USD/KRW.
 
 CLAUDE.md 8) Macro 15%는 미국 거시(VIX/T10Y2Y/DGS10)가 베이스. KR 종목은
-USD/KRW 환율(FRED DEXKOUS)을 추가 가중하여 한국 거시 영향(외인 자금·수출)
-일부 반영. US 종목은 기존 3 시리즈 그대로.
+USD/KRW 환율(FRED DEXKOUS)을 추가 가중. **절대값 + 90일 평균 대비 추세를
+블렌딩**하여 변별력 확보 (예: 현재 5% 금리도 90일 대비 하락 추세면 우호).
+
+이전: 절대값 임계치만 — 현재 4-5% 금리 환경에서 _score_dgs10 30~45 평탄선.
+지금: 절대값 30% + 추세 70% 블렌딩 (VIX는 절대 70% — 공포 자체가 정보).
 """
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
 from datetime import timedelta
 from functools import lru_cache
 from typing import Any
@@ -20,6 +24,19 @@ from stock_compass.utils.retry import external_call_retry
 
 _logger = get_logger(__name__)
 _FRED_TTL = timedelta(hours=6)
+_MA_WINDOW = 90  # 거래일 (≈ 4.5개월)
+
+
+@dataclass(frozen=True, slots=True)
+class FredSeriesPoint:
+    """FRED 시리즈의 latest + 90일 평균 + 추세율."""
+
+    latest: float | None
+    ma_90: float | None
+    trend_pct: float | None  # (latest - ma_90) / ma_90 * 100
+
+
+_EMPTY_POINT = FredSeriesPoint(None, None, None)
 
 
 @lru_cache(maxsize=1)
@@ -30,26 +47,40 @@ def _fred_client() -> Any:
 
 
 @external_call_retry
-def _fetch_latest_fred(series_id: str) -> float | None:
+def _fetch_series_fred(series_id: str) -> FredSeriesPoint:
+    """최신값 + 90일 평균 + 추세율. 실패 시 모든 필드 None."""
     try:
         series = _fred_client().get_series(series_id).dropna()
     except (ConnectionError, TimeoutError, ValueError, OSError) as e:
         _logger.warning("FRED 시리즈 호출 실패: %s (%s)", series_id, e)
-        return None
+        return _EMPTY_POINT
     if series.empty:
-        return None
-    return float(series.iloc[-1])
+        return _EMPTY_POINT
+    latest = float(series.iloc[-1])
+    recent = series.iloc[-_MA_WINDOW:]
+    ma_90: float | None = float(recent.mean()) if not recent.empty else None
+    trend_pct: float | None = (
+        (latest - ma_90) / ma_90 * 100
+        if ma_90 is not None and ma_90 != 0
+        else None
+    )
+    return FredSeriesPoint(latest=latest, ma_90=ma_90, trend_pct=trend_pct)
 
 
-def _latest(series_id: str) -> float | None:
-    cache_name = f"fred-{series_id}"
+def _series(series_id: str) -> FredSeriesPoint:
+    """6h 캐시 — `_fetch_series_fred` 래퍼."""
+    cache_name = f"fred-series-{series_id}"
     cached = load_json(cache_name, _FRED_TTL)
-    if isinstance(cached, int | float):
-        return float(cached)
-    v = _fetch_latest_fred(series_id)
-    if v is not None:
-        save_json(cache_name, v)
-    return v
+    if isinstance(cached, dict):
+        return FredSeriesPoint(
+            latest=cached.get("latest"),
+            ma_90=cached.get("ma_90"),
+            trend_pct=cached.get("trend_pct"),
+        )
+    point = _fetch_series_fred(series_id)
+    if point.latest is not None:
+        save_json(cache_name, asdict(point))
+    return point
 
 
 def _score_vix(vix: float | None) -> float | None:
@@ -111,18 +142,114 @@ def _score_usdkrw(rate: float | None) -> float | None:
     return 25.0
 
 
+# ──────────────────────── 추세 점수 ────────────────────────
+
+
+def _score_trend_lower_better(
+    latest: float | None, ma_90: float | None
+) -> float | None:
+    """현재 값이 90일 평균 대비 *낮을수록* 점수 ↑ (VIX/금리/USDKRW 용)."""
+    if latest is None or ma_90 is None or ma_90 == 0:
+        return None
+    ratio = (latest - ma_90) / ma_90
+    if ratio < -0.10:
+        return 90.0  # 강한 하락 추세
+    if ratio < -0.05:
+        return 75.0
+    if ratio < 0.02:
+        return 55.0  # 거의 안정
+    if ratio < 0.05:
+        return 40.0
+    if ratio < 0.10:
+        return 25.0
+    return 15.0  # 강한 상승 추세 (위험)
+
+
+def _score_trend_higher_better(
+    latest: float | None, ma_90: float | None
+) -> float | None:
+    """현재 값이 90일 평균 대비 *높을수록* 점수 ↑ (T10Y2Y spread 용 — 역전 해소)."""
+    if latest is None or ma_90 is None or ma_90 == 0:
+        return None
+    ratio = (latest - ma_90) / ma_90
+    if ratio > 0.10:
+        return 90.0
+    if ratio > 0.05:
+        return 75.0
+    if ratio > -0.02:
+        return 55.0
+    if ratio > -0.05:
+        return 40.0
+    if ratio > -0.10:
+        return 25.0
+    return 15.0
+
+
+def _blend(
+    abs_score: float | None,
+    trend_score: float | None,
+    *,
+    abs_weight: float,
+) -> float | None:
+    """절대값 + 추세 점수 블렌딩. 둘 중 하나만 있으면 그것만 사용."""
+    if abs_score is None and trend_score is None:
+        return None
+    if trend_score is None:
+        return abs_score
+    if abs_score is None:
+        return trend_score
+    trend_weight = 1.0 - abs_weight
+    return abs_weight * abs_score + trend_weight * trend_score
+
+
+def _score_vix_combined(point: FredSeriesPoint) -> float | None:
+    """VIX — 절대값 우선(공포 자체 정보) + 추세 보조."""
+    return _blend(
+        _score_vix(point.latest),
+        _score_trend_lower_better(point.latest, point.ma_90),
+        abs_weight=0.70,
+    )
+
+
+def _score_dgs10_combined(point: FredSeriesPoint) -> float | None:
+    """10Y 금리 — 추세 우선(절대값은 환경 의존). 변별력 회복."""
+    return _blend(
+        _score_dgs10(point.latest),
+        _score_trend_lower_better(point.latest, point.ma_90),
+        abs_weight=0.30,
+    )
+
+
+def _score_spread_combined(point: FredSeriesPoint) -> float | None:
+    """T10Y2Y — 절대값(역전 자체 신호) + 추세(회복 방향) 균형."""
+    return _blend(
+        _score_spread(point.latest),
+        _score_trend_higher_better(point.latest, point.ma_90),
+        abs_weight=0.50,
+    )
+
+
+def _score_usdkrw_combined(point: FredSeriesPoint) -> float | None:
+    """USD/KRW — 절대값(절대 레벨 의미) + 추세(자금 흐름 방향) 균형."""
+    return _blend(
+        _score_usdkrw(point.latest),
+        _score_trend_lower_better(point.latest, point.ma_90),
+        abs_weight=0.50,
+    )
+
+
 def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
     _ = ticker
     market = adapter.market
-    vix = _latest("VIXCLS")
-    spread = _latest("T10Y2Y")
-    dgs10 = _latest("DGS10")
-    usdkrw = _latest("DEXKOUS") if market == "KR" else None
+    vix_p = _series("VIXCLS")
+    spread_p = _series("T10Y2Y")
+    dgs10_p = _series("DGS10")
+    usdkrw_p = _series("DEXKOUS") if market == "KR" else _EMPTY_POINT
 
-    s_vix = _score_vix(vix)
-    s_spread = _score_spread(spread)
-    s_dgs10 = _score_dgs10(dgs10)
-    s_usdkrw = _score_usdkrw(usdkrw)
+    s_vix = _score_vix_combined(vix_p)
+    s_spread = _score_spread_combined(spread_p)
+    s_dgs10 = _score_dgs10_combined(dgs10_p)
+    s_usdkrw = _score_usdkrw_combined(usdkrw_p) if market == "KR" else None
 
     # 시장별 가중: KR은 USD/KRW 비중 0.30을 차지하고 나머지 축소
     if market == "KR":
@@ -143,7 +270,12 @@ def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
         return neutral(
             "macro",
             "FRED 데이터 모두 누락",
-            raw={"vix": vix, "spread": spread, "dgs10": dgs10, "usdkrw": usdkrw},
+            raw={
+                "vix": vix_p.latest,
+                "spread": spread_p.latest,
+                "dgs10": dgs10_p.latest,
+                "usdkrw": usdkrw_p.latest,
+            },
         )
 
     total_weight = sum(w for _, w in valid.values())
@@ -154,13 +286,24 @@ def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
         score=round(score, 2),
         weight=DEFAULT_WEIGHTS["macro"],
         raw_values={
-            "vix": vix,
-            "t10y2y_spread": spread,
-            "dgs10": dgs10,
-            "usdkrw": usdkrw,
+            "vix": vix_p.latest,
+            "vix_ma90": vix_p.ma_90,
+            "vix_trend_pct": vix_p.trend_pct,
+            "t10y2y_spread": spread_p.latest,
+            "spread_ma90": spread_p.ma_90,
+            "spread_trend_pct": spread_p.trend_pct,
+            "dgs10": dgs10_p.latest,
+            "dgs10_ma90": dgs10_p.ma_90,
+            "dgs10_trend_pct": dgs10_p.trend_pct,
+            "usdkrw": usdkrw_p.latest,
+            "usdkrw_ma90": usdkrw_p.ma_90,
+            "usdkrw_trend_pct": usdkrw_p.trend_pct,
             "market_used": market,
             "component_scores": {k: s for k, (s, _) in valid.items()},
         },
-        note=f"FRED {len(valid)}개 시리즈 (시장={market})",
+        note=(
+            f"FRED {len(valid)}개 시리즈 (시장={market}, "
+            f"abs+trend 블렌딩 — 90일 평균 대비)"
+        ),
         source="fred",
     )
