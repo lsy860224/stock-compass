@@ -1,7 +1,8 @@
-"""Technical 팩터 — RSI(14), 200MA 이격률, 거래량 z-score (+ backfill at-time)."""
+"""Technical 팩터 — RSI(14), 200MA, 거래량 z, MACD, ATR(14), 볼린저 %B (+ backfill)."""
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 from stock_compass.factors.base import DEFAULT_WEIGHTS, FactorScore, neutral
@@ -127,14 +128,134 @@ def return_n(close: pd.Series, n: int = 5) -> float | None:
     return float(close.iloc[-1]) / base - 1
 
 
+# ──────────────────────── 추가 지표 ────────────────────────
+
+
+def macd(
+    close: pd.Series,
+) -> tuple[float | None, float | None, float | None]:
+    """MACD(12,26,9). 반환: (macd_line, signal_line, histogram).
+
+    EMA 정착에 최소 26 + 9 = 35 일 필요 → 부족 시 모두 None.
+    """
+    if len(close) < 35:
+        return (None, None, None)
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    macd_line = ema12 - ema26
+    signal_line = macd_line.ewm(span=9, adjust=False).mean()
+    hist = macd_line - signal_line
+    return (
+        float(macd_line.iloc[-1]),
+        float(signal_line.iloc[-1]),
+        float(hist.iloc[-1]),
+    )
+
+
+def atr_14(high: pd.Series, low: pd.Series, close: pd.Series) -> float | None:
+    """ATR(14). Wilder smoothing. high/low/close 동일 index 가정.
+
+    True Range = max(high-low, |high-prev_close|, |low-prev_close|).
+    `Series.where` 로 element-wise max — pd.concat 회피.
+    """
+    if min(len(high), len(low), len(close)) < 15:
+        return None
+    prev_close = close.shift(1)
+    tr = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = tr.where(tr >= tr2, tr2)
+    tr = tr.where(tr >= tr3, tr3)
+    atr = tr.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
+    last = float(atr.iloc[-1])
+    if math.isnan(last):
+        return None
+    return last
+
+
+def bollinger_percent_b(
+    close: pd.Series, window: int = 20, n_std: float = 2.0
+) -> float | None:
+    """볼린저 %B = (close - lower) / (upper - lower). 데이터 < window → None.
+
+    %B < 0: 하단 이탈 (과매도). %B > 1: 상단 이탈 (과매수).
+    """
+    if len(close) < window:
+        return None
+    recent = close.iloc[-window:]
+    mean = float(recent.mean())
+    std = float(recent.std())
+    if std == 0:
+        return None
+    upper = mean + n_std * std
+    lower = mean - n_std * std
+    width = upper - lower
+    if width == 0:
+        return None
+    return (float(close.iloc[-1]) - lower) / width
+
+
+def _score_macd(
+    macd_line: float | None,
+    signal_line: float | None,
+    histogram: float | None,
+) -> float | None:
+    """MACD 점수 — line vs signal 관계 + line 의 영선 위치."""
+    if macd_line is None or signal_line is None or histogram is None:
+        return None
+    above_signal = macd_line > signal_line
+    if above_signal and histogram > 0:
+        # 상승 추세 + 강화. macd 가 영선 위면 더 강한 신호.
+        return 80.0 if macd_line > 0 else 65.0
+    if not above_signal and histogram < 0:
+        return 20.0 if macd_line < 0 else 35.0
+    # cross-over 직전·직후 — 모호
+    return 50.0
+
+
+def _score_atr(atr: float | None, last_close: float | None) -> float | None:
+    """ATR/close 비율 — 일변동성. 낮을수록 안정 = 높은 점수."""
+    if atr is None or last_close is None or last_close <= 0:
+        return None
+    ratio = atr / last_close
+    if ratio < 0.015:
+        return 70.0
+    if ratio < 0.03:
+        return 55.0
+    if ratio < 0.05:
+        return 40.0
+    return 25.0
+
+
+def _score_bollinger(percent_b: float | None) -> float | None:
+    """볼린저 %B — 하단 이탈(과매도)→고점, 상단 이탈(과매수)→저점."""
+    if percent_b is None:
+        return None
+    if percent_b < 0:
+        return 85.0
+    if percent_b < 0.2:
+        return 75.0
+    if percent_b < 0.5:
+        return 60.0
+    if percent_b < 0.8:
+        return 50.0
+    if percent_b < 1.0:
+        return 35.0
+    return 20.0
+
+
 def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
     hist = adapter.get_price_history(ticker, period="2y")
     if hist.is_empty():
         return neutral("technical", f"가격 데이터 없음 ({ticker})")
 
-    close = hist.df["close"]
-    volume = hist.df["volume"]
-    return _calculate_from_series(close, volume, source=hist.source)
+    return _calculate_from_series(
+        close=hist.df["close"],
+        volume=hist.df["volume"],
+        high=hist.df["high"],
+        low=hist.df["low"],
+        source=hist.source,
+    )
 
 
 def calculate_at_close(
@@ -143,27 +264,43 @@ def calculate_at_close(
     *,
     as_of: date_cls,
     source: str = "backfill",
+    high: pd.Series | None = None,
+    low: pd.Series | None = None,
 ) -> FactorScore:
     """백필용 시점별 Technical 점수.
 
-    close/volume 은 호출자가 미리 `index <= as_of` 로 slice 한 상태여야 함.
-    last_close 는 series 의 마지막 값 자동 사용 (그 시점 종가).
-    `source="backfill"` 로 표시되어 사용자가 실시간 vs 백필 구분 가능.
+    close/volume/high/low 는 호출자가 미리 `index <= as_of` 로 slice. high/low 없으면
+    ATR component 만 skip. `source="backfill"` 로 실시간 vs 백필 구분.
     """
     _ = as_of  # 호출자가 slice 책임 — 여기선 메타 표시 용도
     if close.empty:
         return neutral("technical", f"가격 데이터 없음 (as_of={as_of})")
-    return _calculate_from_series(close, volume, source=source)
+    return _calculate_from_series(
+        close=close, volume=volume, source=source, high=high, low=low
+    )
 
 
 def _calculate_from_series(
-    close: pd.Series, volume: pd.Series, *, source: str
+    close: pd.Series,
+    volume: pd.Series,
+    *,
+    source: str,
+    high: pd.Series | None = None,
+    low: pd.Series | None = None,
 ) -> FactorScore:
-    """OHLCV close/volume series 에서 Technical 4 지표 + 점수 산출 — 공통 로직."""
+    """OHLCV series → Technical 6 지표 점수. high/low None 이면 ATR 제외."""
     rsi = rsi_14(close)
     dist = ma200_distance(close)
     z = volume_zscore(volume)
     r5 = return_n(close, 5)
+    macd_line, signal_line, histogram = macd(close)
+    atr = (
+        atr_14(high, low, close)
+        if high is not None and low is not None
+        else None
+    )
+    pct_b = bollinger_percent_b(close)
+    last_close = float(close.iloc[-1])
 
     components: dict[str, float] = {}
     if (s := _score_rsi(rsi)) is not None:
@@ -172,12 +309,25 @@ def _calculate_from_series(
         components["ma200_distance"] = s
     if (s := _score_volume_z(z, r5)) is not None:
         components["volume_zscore"] = s
+    if (s := _score_macd(macd_line, signal_line, histogram)) is not None:
+        components["macd"] = s
+    if (s := _score_atr(atr, last_close)) is not None:
+        components["atr_14"] = s
+    if (s := _score_bollinger(pct_b)) is not None:
+        components["bollinger_pct_b"] = s
 
     if not components:
         return neutral(
             "technical",
             f"기술 지표 산출 불가 (데이터 {len(close)}일)",
-            raw={"rsi_14": rsi, "ma200_distance": dist, "volume_zscore": z},
+            raw={
+                "rsi_14": rsi,
+                "ma200_distance": dist,
+                "volume_zscore": z,
+                "macd_histogram": histogram,
+                "atr_14": atr,
+                "bollinger_pct_b": pct_b,
+            },
         )
 
     score = sum(components.values()) / len(components)
@@ -190,7 +340,12 @@ def _calculate_from_series(
             "ma200_distance": dist,
             "volume_zscore": z,
             "return_5d": r5,
-            "last_close": float(close.iloc[-1]),
+            "macd_line": macd_line,
+            "macd_signal": signal_line,
+            "macd_histogram": histogram,
+            "atr_14": atr,
+            "bollinger_pct_b": pct_b,
+            "last_close": last_close,
             "data_points": len(close),
             "component_scores": components,
         },

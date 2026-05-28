@@ -113,6 +113,8 @@ def run_backfill(
 
     close = hist.df["close"]
     volume = hist.df["volume"]
+    high = hist.df["high"]
+    low = hist.df["low"]
     currency = "KRW" if market == "KR" else "USD"
 
     processed = 0
@@ -142,6 +144,8 @@ def run_backfill(
                     continue
                 close_slice = close.loc[:ts]
                 volume_slice = volume.loc[:ts]
+                high_slice = high.loc[:ts]
+                low_slice = low.loc[:ts]
                 if len(close_slice) < _MIN_HISTORY_DAYS:
                     skipped_history += 1
                     continue
@@ -155,6 +159,8 @@ def run_backfill(
                     currency=currency,
                     close_slice=close_slice,
                     volume_slice=volume_slice,
+                    high_slice=high_slice,
+                    low_slice=low_slice,
                     series_cache=series_cache,
                     qf=qf,
                     as_of=as_of,
@@ -187,6 +193,8 @@ def _build_composite_at(
     currency: str,
     close_slice: Any,
     volume_slice: Any,
+    high_slice: Any | None,
+    low_slice: Any | None,
     series_cache: dict[str, Any],
     qf: QuarterlyFinancials | None,
     as_of: date_cls,
@@ -219,7 +227,12 @@ def _build_composite_at(
         else backfill_skip("fundamentals")
     )
     t = technical_factor.calculate_at_close(
-        close_slice, volume_slice, as_of=as_of, source="backfill"
+        close_slice,
+        volume_slice,
+        as_of=as_of,
+        source="backfill",
+        high=high_slice,
+        low=low_slice,
     )
     m = macro_factor.calculate_at_date(market, series_cache, as_of)
     s = backfill_skip("sentiment")
