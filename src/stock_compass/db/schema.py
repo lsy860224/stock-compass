@@ -219,9 +219,16 @@ lf AS (
     fs.ticker_id,
     MAX(CASE WHEN factor_name='valuation' THEN score END) AS valuation_score,
     MAX(CASE WHEN factor_name='fundamentals' THEN score END) AS fundamentals_score,
+    MAX(CASE WHEN factor_name='quality' THEN score END) AS quality_score,
     MAX(CASE WHEN factor_name='technical' THEN score END) AS technical_score,
     MAX(CASE WHEN factor_name='macro' THEN score END) AS macro_score,
     MAX(CASE WHEN factor_name='sentiment' THEN score END) AS sentiment_score,
+    MAX(CASE WHEN factor_name='quality'
+             THEN json_extract(raw_values, '$.debt_to_equity') END) AS debt_to_equity,
+    MAX(CASE WHEN factor_name='quality'
+             THEN json_extract(raw_values, '$.current_ratio') END) AS current_ratio,
+    MAX(CASE WHEN factor_name='quality'
+             THEN json_extract(raw_values, '$.roa') END) AS roa,
     MAX(CASE WHEN factor_name='valuation'
              THEN json_extract(raw_values, '$.per') END) AS per,
     MAX(CASE WHEN factor_name='valuation'
@@ -261,10 +268,11 @@ SELECT
   lc.price_at_score AS price,
   lc.total_score AS composite_score,
   lc.verdict, lc.sentiment_source,
-  lf.valuation_score, lf.fundamentals_score, lf.technical_score,
+  lf.valuation_score, lf.fundamentals_score, lf.quality_score, lf.technical_score,
   lf.macro_score, lf.sentiment_score,
   lf.per, lf.pbr, lf.peg, lf.dividend_yield,
   lf.roe, lf.revenue_growth_yoy, lf.operating_margin, lf.market_cap,
+  lf.debt_to_equity, lf.current_ratio, lf.roa,
   tm.market_cap_krw, tm.size_bucket,
   lf.rsi_14, lf.ma200_distance, lf.volume_zscore,
   lc.date AS as_of_date,
@@ -287,6 +295,7 @@ SELECT
   cs.date, cs.total_score AS composite_score, cs.verdict,
   MAX(CASE WHEN fs.factor_name='valuation' THEN fs.score END) AS valuation_score,
   MAX(CASE WHEN fs.factor_name='fundamentals' THEN fs.score END) AS fundamentals_score,
+  MAX(CASE WHEN fs.factor_name='quality' THEN fs.score END) AS quality_score,
   MAX(CASE WHEN fs.factor_name='technical' THEN fs.score END) AS technical_score,
   MAX(CASE WHEN fs.factor_name='macro' THEN fs.score END) AS macro_score,
   MAX(CASE WHEN fs.factor_name='sentiment' THEN fs.score END) AS sentiment_score
@@ -374,6 +383,42 @@ CREATE INDEX IF NOT EXISTS idx_ticker_meta_date_cap
   ON ticker_meta(as_of_date DESC, market_cap_krw DESC);
 CREATE INDEX IF NOT EXISTS idx_ticker_meta_bucket
   ON ticker_meta(size_bucket, as_of_date DESC);
+"""
+
+
+# Quality 팩터(Phase A a2) 추가 — factor_scores.factor_name CHECK 에 'quality' 허용.
+# SQLite 는 CHECK 제약 ALTER 불가 → 테이블 재생성. factor_scores 를 참조하는
+# inbound FK 가 없어 foreign_keys 토글 없이 안전 (outbound FK 는 데이터 그대로 보존).
+MIGRATION_008_QUALITY_FACTOR = """
+-- factor_scores 를 참조하는 뷰를 먼저 제거 (table swap 중 dangling 참조 방지).
+-- 아래 SCREENER_VIEWS_DDL 이 재생성.
+DROP VIEW IF EXISTS v_latest_scores;
+DROP VIEW IF EXISTS v_score_history;
+
+CREATE TABLE factor_scores_new (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticker_id INTEGER NOT NULL REFERENCES tickers(id) ON DELETE CASCADE,
+  date TEXT NOT NULL,
+  factor_name TEXT NOT NULL
+    CHECK(factor_name IN
+      ('valuation','fundamentals','quality','technical','macro','sentiment')),
+  score REAL NOT NULL CHECK(score BETWEEN 0 AND 100),
+  weight REAL NOT NULL CHECK(weight BETWEEN 0 AND 1),
+  raw_values TEXT,
+  note TEXT,
+  computed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(ticker_id, date, factor_name)
+);
+INSERT INTO factor_scores_new
+  (id, ticker_id, date, factor_name, score, weight, raw_values, note, computed_at)
+  SELECT id, ticker_id, date, factor_name, score, weight, raw_values, note, computed_at
+  FROM factor_scores;
+DROP TABLE factor_scores;
+ALTER TABLE factor_scores_new RENAME TO factor_scores;
+CREATE INDEX IF NOT EXISTS idx_factor_scores_ticker_date
+  ON factor_scores(ticker_id, date DESC);
+CREATE INDEX IF NOT EXISTS idx_factor_scores_factor
+  ON factor_scores(factor_name, date DESC);
 """
 
 

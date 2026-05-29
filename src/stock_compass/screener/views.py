@@ -38,9 +38,16 @@ _vad_lf AS (
     fs.ticker_id,
     MAX(CASE WHEN factor_name='valuation' THEN score END) AS valuation_score,
     MAX(CASE WHEN factor_name='fundamentals' THEN score END) AS fundamentals_score,
+    MAX(CASE WHEN factor_name='quality' THEN score END) AS quality_score,
     MAX(CASE WHEN factor_name='technical' THEN score END) AS technical_score,
     MAX(CASE WHEN factor_name='macro' THEN score END) AS macro_score,
     MAX(CASE WHEN factor_name='sentiment' THEN score END) AS sentiment_score,
+    MAX(CASE WHEN factor_name='quality'
+             THEN json_extract(raw_values, '$.debt_to_equity') END) AS debt_to_equity,
+    MAX(CASE WHEN factor_name='quality'
+             THEN json_extract(raw_values, '$.current_ratio') END) AS current_ratio,
+    MAX(CASE WHEN factor_name='quality'
+             THEN json_extract(raw_values, '$.roa') END) AS roa,
     MAX(CASE WHEN factor_name='valuation'
              THEN json_extract(raw_values, '$.per') END) AS per,
     MAX(CASE WHEN factor_name='valuation'
@@ -82,11 +89,12 @@ _vad AS (
     _vad_lc.price_at_score AS price,
     _vad_lc.total_score AS composite_score,
     _vad_lc.verdict, _vad_lc.sentiment_source,
-    _vad_lf.valuation_score, _vad_lf.fundamentals_score, _vad_lf.technical_score,
-    _vad_lf.macro_score, _vad_lf.sentiment_score,
+    _vad_lf.valuation_score, _vad_lf.fundamentals_score, _vad_lf.quality_score,
+    _vad_lf.technical_score, _vad_lf.macro_score, _vad_lf.sentiment_score,
     _vad_lf.per, _vad_lf.pbr, _vad_lf.peg, _vad_lf.dividend_yield,
     _vad_lf.roe, _vad_lf.revenue_growth_yoy, _vad_lf.operating_margin,
     _vad_lf.market_cap,
+    _vad_lf.debt_to_equity, _vad_lf.current_ratio, _vad_lf.roa,
     _vad_tm.market_cap_krw, _vad_tm.size_bucket,
     _vad_lf.rsi_14, _vad_lf.ma200_distance, _vad_lf.volume_zscore,
     _vad_lc.date AS as_of_date

@@ -6,12 +6,15 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-FactorName = Literal["valuation", "fundamentals", "technical", "macro", "sentiment"]
+FactorName = Literal[
+    "valuation", "fundamentals", "quality", "technical", "macro", "sentiment"
+]
 
-# CLAUDE.md 8) 기본 가중치
+# CLAUDE.md 8) 기본 가중치 — Quality(a2) 신설 시 Fundamentals 25% 를 F15 + Q10 으로 분할.
 DEFAULT_WEIGHTS: dict[FactorName, float] = {
     "valuation": 0.30,
-    "fundamentals": 0.25,
+    "fundamentals": 0.15,
+    "quality": 0.10,
     "technical": 0.20,
     "macro": 0.15,
     "sentiment": 0.10,

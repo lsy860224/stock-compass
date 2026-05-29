@@ -193,7 +193,14 @@ def _render_history() -> None:
 
     factor_cols = [
         c
-        for c in ("valuation", "fundamentals", "technical", "macro", "sentiment")
+        for c in (
+            "valuation",
+            "fundamentals",
+            "quality",
+            "technical",
+            "macro",
+            "sentiment",
+        )
         if c in df.columns
     ]
     if factor_cols:

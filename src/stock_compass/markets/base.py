@@ -55,6 +55,12 @@ class Fundamentals(BaseModel):
     profit_margin: float | None = None
     free_cash_flow: float | None = None
     market_cap: float | None = None
+    # Quality 팩터용 (Phase A a2) — 모두 yfinance .info 단일 호출
+    debt_to_equity: float | None = Field(
+        default=None, description="부채/자본 (yfinance % 스케일, 154.5 = 154.5%)"
+    )
+    current_ratio: float | None = Field(default=None, description="유동자산/유동부채")
+    roa: float | None = Field(default=None, description="ROA (0.08 = 8%)")
     # Valuation Range용 (Phase A)
     trailing_eps: float | None = None
     forward_eps: float | None = None
