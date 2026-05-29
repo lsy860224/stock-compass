@@ -300,6 +300,39 @@ class TestKrSourceChain:
         assert syms["005930"] == "005930.KS"
         assert syms["247540"] == "247540.KQ"
 
+    def test_pykrx_index_no_creds_short_circuits(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "stock_compass.utils.krx_auth.apply_krx_credentials", lambda: False
+        )
+        assert _sources._fetch_kr_index_pykrx("1028", "KOSPI") == []
+
+    def test_pykrx_index_arg_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """pykrx 1.2.x get_index_portfolio_deposit_file(ticker, date) 순서 회귀 방지."""
+        monkeypatch.setattr(
+            "stock_compass.utils.krx_auth.apply_krx_credentials", lambda: True
+        )
+        monkeypatch.setattr(_sources, "_kr_business_day", lambda: "20260529")
+        monkeypatch.setattr(_sources, "_kr_name", lambda c: f"name-{c}")
+        recorded: dict[str, object] = {}
+
+        def fake(ticker: str, date: str | None = None, alternative: bool = False):
+            recorded["ticker"] = ticker
+            recorded["date"] = date
+            return ["005930", "000660"]
+
+        monkeypatch.setattr(
+            "pykrx.stock.get_index_portfolio_deposit_file", fake
+        )
+        out = _sources._fetch_kr_index_pykrx("1028", "KOSPI")
+        assert recorded["ticker"] == "1028"  # 지수코드가 첫 인자 (date 아님)
+        assert recorded["date"] == "20260529"
+        assert out == [
+            ("005930", "name-005930", "KOSPI"),
+            ("000660", "name-000660", "KOSPI"),
+        ]
+
 
 class TestKrListingFilter:
     @pytest.mark.parametrize(

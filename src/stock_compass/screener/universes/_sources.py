@@ -126,7 +126,8 @@ def _fetch_kr_index_pykrx(index_code: str, market_sub: str) -> list[tuple[str, s
         with krx_quiet():
             from pykrx.stock import get_index_portfolio_deposit_file
 
-            raw = get_index_portfolio_deposit_file(_kr_business_day(), index_code)
+            # pykrx 1.2.x 시그니처: (ticker=지수코드, date) — 1.0.x 의 (date, ticker)에서 변경
+            raw = get_index_portfolio_deposit_file(index_code, _kr_business_day())
     except (ConnectionError, TimeoutError, ValueError, IndexError, KeyError, OSError) as e:
         _logger.warning("KRX 지수 멤버 조회 실패 (%s): %s", index_code, e)
         return []
