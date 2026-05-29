@@ -687,3 +687,55 @@ CREATE TABLE IF NOT EXISTS screener_runs (
 
 INSERT INTO schema_version (version) VALUES (3);
 ```
+
+---
+
+## Phase A 신규 테이블 — Size·시가총액 메타데이터 (migration 007)
+
+### `ticker_meta`
+
+종목별 **시점별** Size 메타데이터. 팩터 점수와 분리된 metadata로, 종합 점수
+가중치에 영향을 주지 않는다. 스크리너가 `size_bucket`·`market_cap_krw`로 필터·
+정렬·cross-market 비교에 사용.
+
+| 칼럼 | 타입 | 설명 |
+|---|---|---|
+| ticker_id | INTEGER | tickers.id (FK, ON DELETE CASCADE) |
+| as_of_date | TEXT | 기준일 (PK 일부) |
+| market_cap | REAL | 시가총액 (현지 통화 KRW/USD) |
+| market_cap_krw | REAL | KRW 환산 시가총액 (US=현지값×USD/KRW, FX 미가용 시 NULL) |
+| size_bucket | TEXT | mega/large/mid/small/micro (KRW 환산 기준 분류) |
+| shares_outstanding | REAL | 상장주식수 (백필 시점 시가총액 복원용) |
+| source | TEXT | `batch` / `backfill` |
+| created_at | TEXT | 생성 시각 |
+
+- **PK**: `(ticker_id, as_of_date)` — 시점별 1행, upsert.
+- **size_bucket 임계치** (KRW, USD 표준 캡 티어 @~1350 환산): mega ≥ 200조,
+  large ≥ 10조, mid ≥ 2조, small ≥ 3000억, 그 미만 micro.
+- **적재 경로**: `batch`(yfinance 현재 시가총액) + `backfill`(close × shares_outstanding
+  으로 과거 복원, point-in-time USD/KRW 환산).
+- **뷰 노출**: `v_latest_scores`·`v_at_date(:date)`에 `market_cap_krw`,
+  `size_bucket` 칼럼 추가 (LEFT JOIN — 메타 없으면 NULL). `v_at_date`는
+  `as_of_date <= :date` 의 최신 메타만 사용 (look-ahead 차단).
+
+```sql
+-- 007_ticker_meta.sql
+CREATE TABLE IF NOT EXISTS ticker_meta (
+  ticker_id INTEGER NOT NULL REFERENCES tickers(id) ON DELETE CASCADE,
+  as_of_date TEXT NOT NULL,
+  market_cap REAL,
+  market_cap_krw REAL,
+  size_bucket TEXT CHECK(size_bucket IN ('mega','large','mid','small','micro')),
+  shares_outstanding REAL,
+  source TEXT NOT NULL DEFAULT 'batch' CHECK(source IN ('batch','backfill')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (ticker_id, as_of_date)
+);
+CREATE INDEX IF NOT EXISTS idx_ticker_meta_date_cap
+  ON ticker_meta(as_of_date DESC, market_cap_krw DESC);
+CREATE INDEX IF NOT EXISTS idx_ticker_meta_bucket
+  ON ticker_meta(size_bucket, as_of_date DESC);
+
+-- ticker_meta 생성 후 v_latest_scores 재실행 (size 칼럼 노출)
+INSERT INTO schema_version (version) VALUES (7);
+```

@@ -78,7 +78,9 @@ uv run stock-compass screen --interactive
 | market | TEXT | KR / US |
 | sector | TEXT | |
 | price | REAL | snapshots.close (최신) |
-| market_cap | REAL | yfinance/pykrx |
+| market_cap | REAL | yfinance/pykrx (현지 통화) |
+| market_cap_krw | REAL | ticker_meta (KRW 환산, cross-market 비교) |
+| size_bucket | TEXT | ticker_meta (mega/large/mid/small/micro) |
 | composite_score | REAL | composite_scores.total_score (최신) |
 | verdict | TEXT | 관심권/중립/주의 |
 | valuation_score | REAL | factor_scores |
@@ -154,6 +156,8 @@ return_1m, return_3m, return_6m, return_12m
   ev_ebitda           EV/EBITDA
   dividend_yield       배당수익률 (소수, 0.03 = 3%)
   market_cap           시가총액 (현지 통화)
+  market_cap_krw       KRW 환산 시가총액 (cross-market 비교)
+  size_bucket          규모 등급 (mega/large/mid/small/micro)
 
 [Fundamentals]
   revenue_growth_yoy   매출 성장률 YoY (소수, 0.10 = 10%)

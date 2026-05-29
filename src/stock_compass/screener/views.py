@@ -67,6 +67,15 @@ _vad_lf AS (
   JOIN _vad_latest l ON fs.ticker_id = l.ticker_id AND fs.date = l.d
   GROUP BY fs.ticker_id
 ),
+_vad_tm AS (
+  SELECT m.ticker_id, m.market_cap_krw, m.size_bucket
+  FROM ticker_meta m
+  WHERE m.as_of_date <= '{d}'
+    AND m.as_of_date = (
+      SELECT MAX(m2.as_of_date) FROM ticker_meta m2
+      WHERE m2.ticker_id = m.ticker_id AND m2.as_of_date <= '{d}'
+    )
+),
 _vad AS (
   SELECT
     t.id AS ticker_id, t.code, t.name, t.market, t.sector,
@@ -78,10 +87,12 @@ _vad AS (
     _vad_lf.per, _vad_lf.pbr, _vad_lf.peg, _vad_lf.dividend_yield,
     _vad_lf.roe, _vad_lf.revenue_growth_yoy, _vad_lf.operating_margin,
     _vad_lf.market_cap,
+    _vad_tm.market_cap_krw, _vad_tm.size_bucket,
     _vad_lf.rsi_14, _vad_lf.ma200_distance, _vad_lf.volume_zscore,
     _vad_lc.date AS as_of_date
   FROM tickers t
   JOIN _vad_lc ON _vad_lc.ticker_id = t.id
   LEFT JOIN _vad_lf ON _vad_lf.ticker_id = t.id
+  LEFT JOIN _vad_tm ON _vad_tm.ticker_id = t.id
   WHERE t.delisted_at IS NULL OR t.delisted_at > '{d}'
 )"""

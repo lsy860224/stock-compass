@@ -247,6 +247,14 @@ lf AS (
   FROM factor_scores fs
   JOIN latest l ON fs.ticker_id = l.ticker_id AND fs.date = l.d
   GROUP BY fs.ticker_id
+),
+tm AS (
+  SELECT m.ticker_id, m.market_cap_krw, m.size_bucket
+  FROM ticker_meta m
+  JOIN (
+    SELECT ticker_id, MAX(as_of_date) AS d
+    FROM ticker_meta GROUP BY ticker_id
+  ) mx ON m.ticker_id = mx.ticker_id AND m.as_of_date = mx.d
 )
 SELECT
   t.id AS ticker_id, t.code, t.name, t.market, t.sector,
@@ -257,6 +265,7 @@ SELECT
   lf.macro_score, lf.sentiment_score,
   lf.per, lf.pbr, lf.peg, lf.dividend_yield,
   lf.roe, lf.revenue_growth_yoy, lf.operating_margin, lf.market_cap,
+  tm.market_cap_krw, tm.size_bucket,
   lf.rsi_14, lf.ma200_distance, lf.volume_zscore,
   lc.date AS as_of_date,
   COALESCE(
@@ -267,6 +276,7 @@ SELECT
 FROM tickers t
 JOIN lc ON lc.ticker_id = t.id
 LEFT JOIN lf ON lf.ticker_id = t.id
+LEFT JOIN tm ON tm.ticker_id = t.id
 WHERE t.delisted_at IS NULL OR t.delisted_at > lc.date;
 
 
@@ -340,6 +350,30 @@ CREATE INDEX IF NOT EXISTS idx_backtest_results_run_at
   ON backtest_results(run_at DESC);
 CREATE INDEX IF NOT EXISTS idx_backtest_results_preset
   ON backtest_results(preset_name, run_at DESC);
+"""
+
+
+# Size·시가총액 메타데이터 시계열 (Phase A a3). 팩터 점수와 분리된 metadata —
+# 가중치에 영향 없음. backfill 은 closexshares_outstanding 으로 과거 시가총액 복원,
+# batch 는 yfinance 현재값. market_cap_krw 는 cross-market 비교용 KRW 환산값.
+MIGRATION_007_TICKER_META = """
+CREATE TABLE IF NOT EXISTS ticker_meta (
+  ticker_id INTEGER NOT NULL REFERENCES tickers(id) ON DELETE CASCADE,
+  as_of_date TEXT NOT NULL,
+  market_cap REAL,
+  market_cap_krw REAL,
+  size_bucket TEXT
+    CHECK(size_bucket IN ('mega','large','mid','small','micro')),
+  shares_outstanding REAL,
+  source TEXT NOT NULL DEFAULT 'batch'
+    CHECK(source IN ('batch','backfill')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (ticker_id, as_of_date)
+);
+CREATE INDEX IF NOT EXISTS idx_ticker_meta_date_cap
+  ON ticker_meta(as_of_date DESC, market_cap_krw DESC);
+CREATE INDEX IF NOT EXISTS idx_ticker_meta_bucket
+  ON ticker_meta(size_bucket, as_of_date DESC);
 """
 
 

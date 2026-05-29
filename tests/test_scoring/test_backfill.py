@@ -247,6 +247,50 @@ class TestRunBackfill:
         assert result.rows  # 그 시점에 데이터 있음
         assert result.rows[0]["code"] == "TEST"
 
+    def test_backfill_writes_ticker_meta_when_shares_available(
+        self, db_path: Path, patch_external: None, fake_adapter: _FakeAdapter
+    ) -> None:
+        """qf.shares_outstanding 있으면 시점별 ticker_meta(source='backfill') 적재."""
+        from stock_compass.markets.base import (
+            QuarterlyDatum,
+            QuarterlyFinancials,
+        )
+
+        qf = QuarterlyFinancials(
+            ticker="TEST",
+            market="US",
+            quarters=[
+                QuarterlyDatum(
+                    period_end=date(2025, 3, 31),
+                    publish_after=date(2025, 5, 15),
+                    revenue=1.0e9,
+                    net_income=1.0e8,
+                    equity=2.0e9,
+                )
+            ],
+            shares_outstanding=1.0e8,
+        )
+        fake_adapter.get_quarterly_financials = lambda ticker: qf  # type: ignore[attr-defined]
+
+        run_backfill("TEST", "US", start=date(2025, 6, 1), end=date(2025, 7, 1))
+        with sqlite3.connect(db_path) as c:
+            c.row_factory = sqlite3.Row
+            rows = c.execute(
+                "SELECT market_cap, size_bucket, source FROM ticker_meta"
+            ).fetchall()
+        assert rows, "ticker_meta 행이 생성돼야 함"
+        assert all(r["source"] == "backfill" for r in rows)
+        assert all(r["market_cap"] is not None for r in rows)
+
+    def test_backfill_no_ticker_meta_without_shares(
+        self, db_path: Path, patch_external: None, fake_adapter: _FakeAdapter
+    ) -> None:
+        """qf 없으면(=shares 없음) ticker_meta 미적재 — composite 만 기록."""
+        run_backfill("TEST", "US", start=date(2025, 6, 1), end=date(2025, 7, 1))
+        with sqlite3.connect(db_path) as c:
+            n = c.execute("SELECT COUNT(*) FROM ticker_meta").fetchone()[0]
+        assert n == 0
+
     def test_backfill_factor_sources_marked(
         self, db_path: Path, patch_external: None, fake_adapter: _FakeAdapter
     ) -> None:

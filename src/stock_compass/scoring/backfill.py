@@ -93,14 +93,14 @@ def run_backfill(
     except Exception:
         yf_symbol = ticker
 
-    # 3) FRED 시계열 전체 — 모든 시점 재사용
+    # 3) FRED 시계열 전체 — 모든 시점 재사용. DEXKOUS 는 KR Macro + US market_cap_krw
+    #    환산에 모두 쓰이므로 시장 무관하게 fetch.
     series_cache: dict[str, Any] = {
         "VIXCLS": macro_factor.fetch_full_series("VIXCLS"),
         "T10Y2Y": macro_factor.fetch_full_series("T10Y2Y"),
         "DGS10": macro_factor.fetch_full_series("DGS10"),
+        "DEXKOUS": macro_factor.fetch_full_series("DEXKOUS"),
     }
-    if market == "KR":
-        series_cache["DEXKOUS"] = macro_factor.fetch_full_series("DEXKOUS")
 
     # 4) 분기 재무 — 시점별 V/F 재구성용. 실패 시 None 으로 V/F backfill_skip
     qf: QuarterlyFinancials | None = None
@@ -121,7 +121,14 @@ def run_backfill(
     skipped_history = 0
     skipped_oor = 0
 
-    from stock_compass.db import get_db_connection, upsert_composite_score
+    from stock_compass.db import (
+        get_db_connection,
+        upsert_composite_score,
+        upsert_ticker_meta,
+    )
+    from stock_compass.scoring.size import build_ticker_meta, usdkrw_at
+
+    shares = qf.shares_outstanding if qf is not None else None
 
     path = db_path or None
     conn_ctx = (
@@ -150,6 +157,12 @@ def run_backfill(
                     skipped_history += 1
                     continue
 
+                close_at_date = float(close_slice.iloc[-1])
+                market_cap_at_date = (
+                    close_at_date * shares
+                    if shares is not None and shares > 0
+                    else None
+                )
                 composite = _build_composite_at(
                     ticker=ticker,
                     market=market,
@@ -164,8 +177,23 @@ def run_backfill(
                     series_cache=series_cache,
                     qf=qf,
                     as_of=as_of,
+                    market_cap_at_date=market_cap_at_date,
                 )
-                upsert_composite_score(conn, composite, on_date=as_of)
+                ticker_id = upsert_composite_score(conn, composite, on_date=as_of)
+                if market_cap_at_date is not None:
+                    meta = build_ticker_meta(
+                        market=market,
+                        market_cap=market_cap_at_date,
+                        shares_outstanding=shares,
+                        usdkrw=usdkrw_at(series_cache["DEXKOUS"], as_of),
+                    )
+                    upsert_ticker_meta(
+                        conn,
+                        ticker_id=ticker_id,
+                        as_of=as_of,
+                        meta=meta,
+                        source="backfill",
+                    )
                 processed += 1
             conn.execute("COMMIT")
         except Exception:
@@ -198,8 +226,12 @@ def _build_composite_at(
     series_cache: dict[str, Any],
     qf: QuarterlyFinancials | None,
     as_of: date_cls,
+    market_cap_at_date: float | None,
 ) -> Any:
-    """시점별 CompositeScore 생성. ScoringEngine 의 _weighted_average 와 동일 로직."""
+    """시점별 CompositeScore 생성. ScoringEngine 의 _weighted_average 와 동일 로직.
+
+    `market_cap_at_date` 는 호출자가 closexshares 로 산출 (FCF yield 재구성용).
+    """
     from stock_compass.scoring.engine import (
         DISCLAIMER,
         CompositeScore,
@@ -207,9 +239,6 @@ def _build_composite_at(
     )
 
     close_at_date = float(close_slice.iloc[-1])
-    market_cap_at_date: float | None = None
-    if qf is not None and qf.shares_outstanding and qf.shares_outstanding > 0:
-        market_cap_at_date = close_at_date * qf.shares_outstanding
 
     # V/F: 분기 데이터 있으면 시점별 재구성, 없으면 backfill_skip
     v = (
