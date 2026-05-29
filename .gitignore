@@ -29,6 +29,9 @@ data/backups/
 data/craft_export/
 data/prompts/
 
+# ─── 캐시 (재생성 가능) ───
+docs_cache/
+
 # ─── 로그 ───
 logs/
 *.log
@@ -49,6 +52,9 @@ htmlcov/
 .idea/
 *.swp
 *.swo
+
+# ─── Claude Code (로컬 세션·설정) ───
+.claude/
 
 # ─── macOS ───
 .DS_Store
