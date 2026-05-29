@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     naver_client_id: str | None = None
     naver_client_secret: SecretStr | None = None
 
+    # ─── KRX 로그인 (선택, 정확 지수 구성종목) ───
+    # data.krx.co.kr 무료 계정. KRX가 지수 구성 데이터를 로그인 뒤로 이전 →
+    # 미설정 시 FinanceDataReader 시총상위 N 프록시로 자동 폴백.
+    krx_id: str | None = None
+    krx_pw: SecretStr | None = None
+
     # ─── Craft (선택, Phase 5+) ───
     # CRAFT_API_TOKEN은 Craft Imagine 탭에서 받은 "API URL" 그대로 (secret 포함).
     # 예: https://connect.craft.do/links/<secret>/api/v1 — 헤더 인증 불필요.

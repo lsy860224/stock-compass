@@ -405,13 +405,26 @@ uv run stock-compass sentiment import data/prompts/deepdive-YYYYMMDD-response.tx
 
 ## 8) 유니버스 자동 갱신
 
-### KR (`screener/universes/kr.py`)
+### KR (`screener/universes/__init__.py` + `_sources.py`)
 
-| 유니버스 | 출처 | 갱신 주기 |
-|---|---|---|
-| KOSPI_200 | `pykrx.stock.get_index_portfolio_deposit_file("1028")` | 매일 |
-| KOSDAQ_150 | `pykrx.stock.get_index_portfolio_deposit_file("2203")` | 매일 |
-| ALL_KR | `pykrx.stock.get_market_ticker_list` (KOSPI+KOSDAQ) | 매일 |
+소스 체인: **KRX 자격증명 있으면 pykrx 정확 지수 → 없으면 FinanceDataReader
+시총상위 프록시 → 캐시**. KRX가 지수 구성 데이터를 로그인(`KRX_ID`/`KRX_PW`)
+뒤로 이전해, 자격증명 없으면 pykrx 지수 엔드포인트는 빈 응답이다.
+
+| 유니버스 | 1차 (정확, KRX 자격증명) | 2차 (프록시, 무인증) | 갱신 |
+|---|---|---|---|
+| KOSPI_200 | `get_index_portfolio_deposit_file("1028")` | FDR `StockListing("KOSPI")` 시총상위 200 | 주간 |
+| KOSDAQ_150 | `get_index_portfolio_deposit_file("2203")` | FDR `StockListing("KOSDAQ")` 시총상위 150 | 주간 |
+| ALL_KR | KOSPI_200 ∪ KOSDAQ_150 (정확) | 프록시 합집합 (~350) | 주간 |
+
+- **프록시 한계**: 정확한 지수 멤버십이 아니라 시총상위 N 근사 (FDR 상장목록은
+  시총 내림차순 → head(N)). 우선주·스팩·관리종목·외국기업은 제외. 정확 지수가
+  필요하면 [data.krx.co.kr](https://data.krx.co.kr) 무료 계정 → `.env.local`에
+  `KRX_ID`/`KRX_PW` 추가 (그러면 1차 경로로 자동 승급).
+- **`.KS`/`.KQ`**: FDR `Market` 칼럼으로 KOSPI/KOSDAQ 구분 → yfinance 심볼 정확화.
+- **갱신 잡**: `weekly-discover`(토 08:00 KST)가 KOSPI_200·KOSDAQ_150·SP500 갱신.
+- **스크리너 노출**: 유니버스 *적재*는 멤버십만 채운다. 스크리너 결과로 뜨려면
+  멤버 *점수화*(batch/backfill/discover)가 선행돼야 함 (US SP500과 동일).
 
 ### US (`screener/universes/us.py`)
 

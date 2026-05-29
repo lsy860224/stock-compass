@@ -235,19 +235,22 @@ def list_universe_members(
 def _refresh_kr(
     conn: sqlite3.Connection,
     universe_code: str,
-    fetcher: Callable[[], list[tuple[str, str]]],
+    fetcher: Callable[[], list[tuple[str, str, str]]],
     *,
     on_date: date_cls | None,
 ) -> UniverseRefreshResult:
     raw = fetcher()
     if not raw:
         raise UniverseFetchError(
-            f"{universe_code}: 멤버 0개 — KRX 장애 또는 캐시 무 (기존 데이터 보존)"
+            f"{universe_code}: 멤버 0개 — KRX 자격증명/FDR/캐시 모두 무 (기존 데이터 보존)"
         )
     pairs: list[tuple[str, Market, str | None, str | None]] = [
-        (code, "KR", name, None) for code, name in raw
+        (code, "KR", name, None) for code, name, _ in raw
     ]
-    return _bulk_register(conn, universe_code, pairs, on_date=on_date)
+    kr_market_sub = {code: market_sub for code, _, market_sub in raw}
+    return _bulk_register(
+        conn, universe_code, pairs, on_date=on_date, kr_market_sub=kr_market_sub
+    )
 
 
 def _refresh_us(
@@ -274,12 +277,15 @@ def _bulk_register(
     pairs: Iterable[tuple[str, Market, str | None, str | None]],
     *,
     on_date: date_cls | None,
+    kr_market_sub: dict[str, str] | None = None,
 ) -> UniverseRefreshResult:
     """공통 등록 — ticker upsert + universe_members INSERT OR IGNORE.
 
     같은 (universe_code, ticker_id, as_of_date) 충돌은 멤버 카운트에서 제외.
+    `kr_market_sub`: KR 종목 code → "KOSPI"/"KOSDAQ" (yfinance .KS/.KQ 정확화).
     """
     d = (on_date or today_kst()).isoformat()
+    subs = kr_market_sub or {}
     inserted = 0
     for code, market, name, sector in pairs:
         ticker_id = upsert_ticker(
@@ -289,7 +295,7 @@ def _bulk_register(
             name=name,
             sector=sector,
             currency="KRW" if market == "KR" else "USD",
-            yfinance_symbol=_guess_symbol(code, market),
+            yfinance_symbol=_guess_symbol(code, market, subs.get(code)),
         )
         cur = conn.execute(
             """
@@ -310,7 +316,9 @@ def _bulk_register(
     )
 
 
-def _guess_symbol(code: str, market: Market) -> str:
+def _guess_symbol(code: str, market: Market, market_sub: str | None = None) -> str:
     if market == "US":
         return code.upper()
-    return f"{code}.KS"  # KOSDAQ은 KrAdapter가 .KQ로 정정
+    if market_sub == "KOSDAQ":
+        return f"{code}.KQ"
+    return f"{code}.KS"  # KOSPI 또는 미상 (미상은 KrAdapter가 런타임 .KQ 재시도)

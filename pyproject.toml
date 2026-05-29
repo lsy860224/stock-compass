@@ -10,7 +10,8 @@ authors = [{ name = "Personal" }]
 dependencies = [
   # 데이터
   "yfinance>=0.2.40",
-  "pykrx>=1.0.45",
+  "pykrx>=1.2.8",  # 1.2.x: KRX 로그인(KRX_ID/KRX_PW) 지원 — 지수 구성종목 정확 조회용
+  "finance-datareader>=0.9.96",  # KR 상장목록(KOSPI/KOSDAQ) — pykrx 지수 엔드포인트 무인증 차단 대체
   "fredapi>=0.5.2",
   "opendartreader>=0.2.2",
   "pandas>=2.2",
@@ -102,6 +103,7 @@ disallow_untyped_defs = true
 module = [
   "yfinance.*",
   "pykrx.*",
+  "FinanceDataReader.*",
   "fredapi.*",
   "OpenDartReader.*",
   "pandas_market_calendars.*",

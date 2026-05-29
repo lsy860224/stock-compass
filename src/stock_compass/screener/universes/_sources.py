@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from datetime import date as date_cls
 from functools import lru_cache
@@ -31,73 +32,186 @@ WIKI_DOW30_URL = "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average"
 KOSPI_200_INDEX_CODE = "1028"
 KOSDAQ_150_INDEX_CODE = "2203"
 
+# KRX 자격증명 없을 때 FinanceDataReader 시총상위 프록시 한도.
+# FDR StockListing 은 시총 내림차순 정렬 → head(N) ≈ 지수 구성 근사.
+KOSPI_200_PROXY_LIMIT = 200
+KOSDAQ_150_PROXY_LIMIT = 150
 
-# ──────────────────────── KR (pykrx) ────────────────────────
+# FDR Dept(소속부) 중 투자 부적합 — 프록시에서 제외.
+_KR_EXCLUDE_DEPT = ("스팩", "SPAC", "관리종목", "투자주의", "환기", "외국기업")
+
+
+# ──────────────────────── KR (pykrx 정확 지수 → FDR 프록시) ────────────────────────
+#
+# 반환 형식: [(code, name, market_sub), ...]  market_sub ∈ {"KOSPI", "KOSDAQ"}
+# (market_sub 로 yfinance 심볼 .KS/.KQ 정확화)
+#
+# 소스 체인:
+#   1) KRX 자격증명(KRX_ID/KRX_PW) 있으면 pykrx 정확 지수 구성종목
+#   2) 없으면 FinanceDataReader 시총상위 N 프록시 (KOSPI200≈top200, KOSDAQ150≈top150)
+#   3) 둘 다 실패하면 7일 캐시 fallback
+# KRX 가 지수 구성 데이터를 로그인 뒤로 이전 → 자격증명 없으면 (1)은 빈 응답.
 
 
 @external_call_retry
-def fetch_kospi_200_constituents() -> list[tuple[str, str]]:
-    """KOSPI 200 멤버 — [(code, name), ...]. pykrx KRX API.
+def fetch_kospi_200_constituents() -> list[tuple[str, str, str]]:
+    """KOSPI 200 멤버 — [(code, name, "KOSPI"), ...].
 
-    네트워크 실패 시 캐시 fallback. 응답 비어 있으면 빈 리스트.
+    KRX 자격증명 있으면 정확 지수, 없으면 FDR KOSPI 시총상위 200 프록시.
     """
-    return _fetch_kr_index(KOSPI_200_INDEX_CODE, cache_key="kospi_200")
+    return _fetch_kr_universe(
+        market_sub="KOSPI",
+        index_code=KOSPI_200_INDEX_CODE,
+        cache_key="kospi_200",
+        proxy_limit=KOSPI_200_PROXY_LIMIT,
+    )
 
 
 @external_call_retry
-def fetch_kosdaq_150_constituents() -> list[tuple[str, str]]:
-    """KOSDAQ 150 멤버."""
-    return _fetch_kr_index(KOSDAQ_150_INDEX_CODE, cache_key="kosdaq_150")
+def fetch_kosdaq_150_constituents() -> list[tuple[str, str, str]]:
+    """KOSDAQ 150 멤버 — [(code, name, "KOSDAQ"), ...]."""
+    return _fetch_kr_universe(
+        market_sub="KOSDAQ",
+        index_code=KOSDAQ_150_INDEX_CODE,
+        cache_key="kosdaq_150",
+        proxy_limit=KOSDAQ_150_PROXY_LIMIT,
+    )
 
 
-def fetch_all_kr_constituents() -> list[tuple[str, str]]:
+def fetch_all_kr_constituents() -> list[tuple[str, str, str]]:
     """KOSPI 200 + KOSDAQ 150 합집합. 코드 기준 중복 제거.
 
-    docs/SCREENER_SPEC.md:402의 ALL_KR 광고. 전체 KRX 종목(~2,500)은 부담이라
-    벤치마크 지수 합집합(~350)으로 시작. 양쪽 모두 실패하면 빈 리스트.
+    docs/SCREENER_SPEC.md의 ALL_KR. 전체 KRX 종목(~2,500)은 부담이라 벤치마크
+    지수(또는 시총상위 프록시) 합집합(~350)으로 시작. 양쪽 모두 실패하면 빈 리스트.
     """
-    seen: dict[str, str] = {}
+    seen: dict[str, tuple[str, str, str]] = {}
     for fetcher in (fetch_kospi_200_constituents, fetch_kosdaq_150_constituents):
         try:
-            for code, name in fetcher():
-                seen.setdefault(code, name)
+            for code, name, market_sub in fetcher():
+                seen.setdefault(code, (code, name, market_sub))
         except (ConnectionError, TimeoutError, OSError) as e:
             _logger.warning("ALL_KR 일부 소스 실패 — 다른 소스 계속: %s", e)
-    return list(seen.items())
+    return list(seen.values())
 
 
-def _fetch_kr_index(index_code: str, *, cache_key: str) -> list[tuple[str, str]]:
-    cached = _read_fallback(cache_key)
+def _fetch_kr_universe(
+    *, market_sub: str, index_code: str, cache_key: str, proxy_limit: int
+) -> list[tuple[str, str, str]]:
+    """KR 유니버스 소스 체인: pykrx(정확) → FDR(프록시) → 캐시."""
+    exact = _fetch_kr_index_pykrx(index_code, market_sub)
+    if exact:
+        _write_fallback(cache_key, [list(t) for t in exact])
+        return exact
+
+    proxy = _fetch_kr_listing_fdr(market_sub, limit=proxy_limit)
+    if proxy:
+        _logger.info(
+            "%s: FDR 시총상위 %d 프록시 (정확 지수는 KRX 자격증명 필요)",
+            cache_key,
+            len(proxy),
+        )
+        _write_fallback(cache_key, [list(t) for t in proxy])
+        return proxy
+
+    return _to_kr_list(_read_fallback(cache_key))
+
+
+def _fetch_kr_index_pykrx(index_code: str, market_sub: str) -> list[tuple[str, str, str]]:
+    """pykrx 정확 지수 구성종목. 자격증명 없으면 빈 리스트(→ caller FDR 폴백)."""
+    from stock_compass.utils.krx_auth import apply_krx_credentials, krx_quiet
+
+    if not apply_krx_credentials():
+        return []  # 자격증명 없음 — pykrx 지수 엔드포인트 로그인 필요
     try:
-        from pykrx.stock import get_index_portfolio_deposit_file
+        with krx_quiet():
+            from pykrx.stock import get_index_portfolio_deposit_file
 
-        date_str = _kr_business_day()
-        codes: list[str] = list(
-            get_index_portfolio_deposit_file(date_str, index_code) or []
-        )
-    except (ConnectionError, TimeoutError, ValueError, IndexError, OSError) as e:
-        _logger.warning(
-            "KRX 지수 멤버 조회 실패 (%s) — 캐시 fallback: %s", index_code, e
-        )
-        return _to_pair_list(cached)
-
+            raw = get_index_portfolio_deposit_file(_kr_business_day(), index_code)
+    except (ConnectionError, TimeoutError, ValueError, IndexError, KeyError, OSError) as e:
+        _logger.warning("KRX 지수 멤버 조회 실패 (%s): %s", index_code, e)
+        return []
+    codes = _coerce_code_list(raw)
     if not codes:
-        _logger.warning(
-            "KRX 응답 비어 있음 (index=%s) — 캐시 fallback", index_code
-        )
-        return _to_pair_list(cached)
+        _logger.info("KRX 지수 %s 빈 응답 (휴장/자격증명?) — FDR 폴백", index_code)
+        return []
+    return [(code, _kr_name(code) or code, market_sub) for code in codes]
 
-    pairs = [(code, _kr_name(code) or code) for code in codes]
-    _write_fallback(cache_key, list(pairs))
-    return pairs
+
+def _fetch_kr_listing_fdr(market_sub: str, *, limit: int) -> list[tuple[str, str, str]]:
+    """FinanceDataReader 상장목록 → 시총상위 `limit` 프록시. 보통주만, 부적합 제외.
+
+    FDR StockListing("KOSPI"/"KOSDAQ") 은 시총 내림차순 → 순서대로 필터 후 head.
+    (Marcap 칼럼 값 자체는 신뢰 불가한 환경 있어 정렬 대신 기본 순서 사용.)
+    """
+    try:
+        import FinanceDataReader as fdr  # noqa: N813 — FDR 공식 관용 alias
+
+        df = fdr.StockListing(market_sub)
+    except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError, OSError) as e:
+        _logger.warning("FDR %s 상장목록 실패: %s", market_sub, e)
+        return []
+    if df is None or getattr(df, "empty", True) or "Code" not in df.columns:
+        return []
+
+    out: list[tuple[str, str, str]] = []
+    for _, row in df.iterrows():
+        code = str(row.get("Code", "")).strip()
+        name = str(row.get("Name", "")).strip()
+        if _is_listable_kr(code, name, str(row.get("Dept", "") or "")):
+            out.append((code, name, market_sub))
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _is_listable_kr(code: str, name: str, dept: str) -> bool:
+    """보통주 + 투자 적합 종목만. 우선주·스팩·관리종목·외국기업 제외."""
+    if len(code) != 6 or not code.isdigit():
+        return False
+    if not code.endswith("0"):  # 보통주 코드는 끝자리 0 — 우선주/신주인수권 제외
+        return False
+    if not name or name.endswith("우") or "스팩" in name:
+        return False
+    return not any(token in dept for token in _KR_EXCLUDE_DEPT)
+
+
+def _coerce_code_list(raw: object) -> list[str]:
+    """pykrx get_index_portfolio_deposit_file 반환 정규화.
+
+    정상은 list[str] 이나 버전/응답에 따라 None·DataFrame·Series 가 올 수 있어
+    방어적으로 처리 (기존 `... or []` 는 DataFrame 에서 truth-value 예외 발생).
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
+    try:
+        import pandas as pd
+
+        if isinstance(raw, pd.DataFrame):
+            return [] if raw.empty else [str(x) for x in raw.index.tolist()]
+        if isinstance(raw, pd.Series | pd.Index):
+            return [str(x) for x in raw.tolist()]
+    except ImportError:
+        pass
+    if isinstance(raw, Iterable):
+        try:
+            return [str(x) for x in raw]
+        except TypeError:
+            return []
+    return []
 
 
 @lru_cache(maxsize=512)
 def _kr_name(code: str) -> str | None:
-    try:
-        from pykrx.stock import get_market_ticker_name
+    """pykrx 종목명 (정확 지수 경로 전용 — FDR 경로는 이름 직접 제공)."""
+    from stock_compass.utils.krx_auth import krx_quiet
 
-        name = get_market_ticker_name(code)
+    try:
+        with krx_quiet():
+            from pykrx.stock import get_market_ticker_name
+
+            name = get_market_ticker_name(code)
         return str(name) if name else None
     except (ConnectionError, TimeoutError, ValueError, KeyError, OSError) as e:
         _logger.debug("KRX 종목명 조회 실패 (%s): %s", code, e)
@@ -106,10 +220,13 @@ def _kr_name(code: str) -> str | None:
 
 def _kr_business_day() -> str:
     """가장 가까운 영업일 (YYYYMMDD). 휴장 날짜에 호출되면 직전 영업일."""
-    try:
-        from pykrx.stock import get_nearest_business_day_in_a_week
+    from stock_compass.utils.krx_auth import krx_quiet
 
-        return str(get_nearest_business_day_in_a_week())
+    try:
+        with krx_quiet():
+            from pykrx.stock import get_nearest_business_day_in_a_week
+
+            return str(get_nearest_business_day_in_a_week())
     except (ConnectionError, TimeoutError, ValueError, IndexError, OSError):
         # KRX 자체가 깨졌으면 오늘 날짜 추정 — caller가 빈 리스트 처리
         return datetime.now(UTC).strftime("%Y%m%d")
@@ -249,10 +366,15 @@ def _write_fallback(name: str, pairs: list[Any]) -> None:
     save_json(f"universes/{name}", [list(p) for p in pairs])
 
 
-def _to_pair_list(cached: list[list[str]] | None) -> list[tuple[str, str]]:
+def _to_kr_list(cached: list[list[str]] | None) -> list[tuple[str, str, str]]:
+    """KR 캐시 → [(code, name, market_sub), ...]. 구 2-항목 캐시는 KOSPI 로 간주."""
     if not cached:
         return []
-    return [(item[0], item[1]) for item in cached if len(item) >= 2]
+    return [
+        (item[0], item[1], item[2] if len(item) > 2 else "KOSPI")
+        for item in cached
+        if len(item) >= 2
+    ]
 
 
 def _to_triple_list(cached: list[list[str]] | None) -> list[tuple[str, str, str]]:

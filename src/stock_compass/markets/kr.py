@@ -40,23 +40,38 @@ _KR_CODE_RE = re.compile(r"^\d{6}$")
 
 @lru_cache(maxsize=1)
 def _kospi_codes() -> frozenset[str]:
-    try:
-        from pykrx.stock import get_market_ticker_list
-
-        return frozenset(get_market_ticker_list(market="KOSPI"))
-    except (ConnectionError, TimeoutError, ValueError, IndexError, KeyError, OSError) as e:
-        _logger.warning("KOSPI 종목 목록 조회 실패 (pykrx/KRX): %s — .KS 추정 사용", e)
-        return frozenset()
+    return _kr_market_codes("KOSPI")
 
 
 @lru_cache(maxsize=1)
 def _kosdaq_codes() -> frozenset[str]:
-    try:
-        from pykrx.stock import get_market_ticker_list
+    return _kr_market_codes("KOSDAQ")
 
-        return frozenset(get_market_ticker_list(market="KOSDAQ"))
+
+def _kr_market_codes(market: str) -> frozenset[str]:
+    """시장별(KOSPI/KOSDAQ) 종목코드 집합 — yfinance .KS/.KQ 분류용.
+
+    pykrx get_market_ticker_list 가 KRX 로그인 뒤로 이동해 무인증 시 빈 응답 →
+    FinanceDataReader 상장목록을 1차 소스로 (.KQ 분류 복구). 실패 시 pykrx 폴백.
+    """
+    try:
+        import FinanceDataReader as fdr  # noqa: N813 — FDR 공식 관용 alias
+
+        df = fdr.StockListing(market)
+        if df is not None and not df.empty and "Code" in df.columns:
+            return frozenset(str(c).strip() for c in df["Code"] if str(c).strip())
+    except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError, OSError) as e:
+        _logger.warning("FDR %s 상장목록 실패 (%s) — pykrx 폴백", market, e)
+
+    from stock_compass.utils.krx_auth import krx_quiet
+
+    try:
+        with krx_quiet():
+            from pykrx.stock import get_market_ticker_list
+
+            return frozenset(get_market_ticker_list(market=market))
     except (ConnectionError, TimeoutError, ValueError, IndexError, KeyError, OSError) as e:
-        _logger.warning("KOSDAQ 종목 목록 조회 실패 (pykrx/KRX): %s — .KQ 미사용", e)
+        _logger.warning("%s 종목 목록 조회 실패 (pykrx): %s — 심볼 추정 사용", market, e)
         return frozenset()
 
 

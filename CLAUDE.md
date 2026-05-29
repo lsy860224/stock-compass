@@ -33,7 +33,8 @@
 - **패키지 관리**: `uv` (`brew install uv`) — pip보다 10~100배 빠름
 - **데이터**:
   - `yfinance` — 미국 + 한국(`.KS`/`.KQ` 접미사) 통합
-  - `pykrx` — 한국 시장 보조 (수급·외인/기관)
+  - `pykrx` — 한국 시장 보조 (개별 OHLCV·수급). 지수 구성종목은 KRX 로그인(`KRX_ID`/`KRX_PW`) 필요
+  - `finance-datareader` — KR 상장목록(KOSPI/KOSDAQ) → 유니버스 + `.KS`/`.KQ` 분류 (무인증 폴백)
   - `fredapi` — 미국 거시 (10Y 금리·VIX·환율)
   - `OpenDartReader` 또는 직접 REST — DART 한국 공시
 - **AI**: `anthropic` SDK — 뉴스/공시 요약만 (서버 사이드 호출 없음, 로컬 실행)
@@ -192,6 +193,7 @@ stock-compass/
 | `FRED_API_KEY` | ✅ | 미국 거시 데이터 | fred.stlouisfed.org/docs/api/api_key.html |
 | `DART_API_KEY` | ✅ (KR 사용 시) | 한국 공시 | opendart.fss.or.kr |
 | `NAVER_CLIENT_ID` / `NAVER_CLIENT_SECRET` | ⛔ 선택 | 한국 뉴스 | developers.naver.com |
+| `KRX_ID` / `KRX_PW` | ⛔ 선택 | 정확한 KOSPI200/KOSDAQ150 지수 구성 (미설정 시 FDR 시총상위 프록시) | data.krx.co.kr (무료) |
 | `CRAFT_API_TOKEN` | ⛔ 선택 (Phase 3+) | Craft 직접 발행 | Craft → Settings → API |
 | `DEFAULT_MARKET` | ✅ | KR 또는 US (기본 시장) | 본인 설정 |
 | `WATCHLIST_KR` | ✅ | 한국 종목 코드 콤마 구분 (예: `005930,035720`) | 본인 |

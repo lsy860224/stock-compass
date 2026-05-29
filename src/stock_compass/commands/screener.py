@@ -351,7 +351,7 @@ def weekly_discover(
         bool,
         typer.Option(
             "--refresh-universe/--no-refresh-universe",
-            help="실행 전 KOSPI_200 + SP500 universe 갱신",
+            help="실행 전 KOSPI_200 + KOSDAQ_150 + SP500 universe 갱신",
         ),
     ] = True,
     limit_per_preset: Annotated[
@@ -395,7 +395,7 @@ def weekly_discover(
 
     if refresh_universe:
         with get_db_connection() as conn:
-            for code in ("KOSPI_200", "SP500"):
+            for code in ("KOSPI_200", "KOSDAQ_150", "SP500"):
                 try:
                     r = refresh(conn, code)
                     console.print(
