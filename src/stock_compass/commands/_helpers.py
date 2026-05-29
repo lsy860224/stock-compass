@@ -88,26 +88,37 @@ def persist_size_metadata(results: list[CompositeScore]) -> None:
     from stock_compass.scoring.size import build_ticker_meta, current_usdkrw
     from stock_compass.utils.dates import today_kst
 
-    rows: list[tuple[CompositeScore, float]] = []
+    rows: list[tuple[CompositeScore, float, float | None]] = []
     for s in results:
         fund = s.factor("fundamentals")
         mcap = fund.raw_values.get("market_cap") if fund else None
         if isinstance(mcap, int | float) and not isinstance(mcap, bool) and mcap > 0:
-            rows.append((s, float(mcap)))
+            shares = fund.raw_values.get("shares_outstanding") if fund else None
+            shares_f = (
+                float(shares)
+                if isinstance(shares, int | float)
+                and not isinstance(shares, bool)
+                and shares > 0
+                else None
+            )
+            rows.append((s, float(mcap), shares_f))
     if not rows:
         return
 
-    usdkrw = current_usdkrw() if any(s.market == "US" for s, _ in rows) else None
+    usdkrw = current_usdkrw() if any(s.market == "US" for s, *_ in rows) else None
     on_date = today_kst()
     with get_db_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
-            for s, mcap in rows:
+            for s, mcap, shares in rows:
                 tid = get_ticker_id(conn, s.ticker, s.market)
                 if tid is None:
                     continue
                 meta = build_ticker_meta(
-                    market=s.market, market_cap=mcap, usdkrw=usdkrw
+                    market=s.market,
+                    market_cap=mcap,
+                    shares_outstanding=shares,
+                    usdkrw=usdkrw,
                 )
                 upsert_ticker_meta(
                     conn, ticker_id=tid, as_of=on_date, meta=meta, source="batch"

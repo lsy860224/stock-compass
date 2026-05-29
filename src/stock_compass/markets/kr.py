@@ -318,6 +318,9 @@ class KrAdapter(MarketAdapter):
             profit_margin=_get(info, "profitMargins", as_=float),
             free_cash_flow=_get(info, "freeCashflow", as_=float),
             market_cap=_get(info, "marketCap", as_=float),
+            shares_outstanding=_get(
+                info, "sharesOutstanding", "impliedSharesOutstanding", as_=float
+            ),
             debt_to_equity=_get(info, "debtToEquity", as_=float),
             current_ratio=_get(info, "currentRatio", as_=float),
             roa=_get(info, "returnOnAssets", as_=float),

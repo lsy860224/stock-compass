@@ -13,13 +13,19 @@ from stock_compass.factors.base import DEFAULT_WEIGHTS, FactorScore
 from stock_compass.scoring.engine import CompositeScore
 
 
-def _score(ticker: str, market: str, market_cap: float | None) -> CompositeScore:
+def _score(
+    ticker: str, market: str, market_cap: float | None, shares: float | None = None
+) -> CompositeScore:
     factors = [
         FactorScore(
             name=n,  # type: ignore[arg-type]
             score=60.0,
             weight=DEFAULT_WEIGHTS[n],  # type: ignore[index]
-            raw_values=({"market_cap": market_cap} if n == "fundamentals" else {}),
+            raw_values=(
+                {"market_cap": market_cap, "shares_outstanding": shares}
+                if n == "fundamentals"
+                else {}
+            ),
         )
         for n in DEFAULT_WEIGHTS
     ]
@@ -87,6 +93,24 @@ def test_persists_us_and_kr_with_buckets(
     assert rows["AAPL"]["source"] == "batch"
     assert rows["005930"]["size_bucket"] == "mega"
     assert rows["005930"]["market_cap_krw"] == 400_000_000_000_000.0
+
+
+def test_persists_shares_outstanding(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """fundamentals raw_values 의 shares_outstanding 이 ticker_meta 에 적재되는지."""
+    from stock_compass.scoring import size
+
+    monkeypatch.setattr(size, "current_usdkrw", lambda: 1350.0)
+    persist_size_metadata(
+        [_score("005930", "KR", 400_000_000_000_000.0, shares=5_969_782_550.0)]
+    )
+
+    with sqlite3.connect(db) as c:
+        c.row_factory = sqlite3.Row
+        row = c.execute("SELECT m.shares_outstanding FROM ticker_meta m").fetchone()
+    assert row is not None
+    assert row["shares_outstanding"] == 5_969_782_550.0
 
 
 def test_skips_when_market_cap_missing(

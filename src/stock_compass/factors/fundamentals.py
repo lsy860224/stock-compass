@@ -333,6 +333,7 @@ def calculate(adapter: MarketAdapter, ticker: str) -> FactorScore:
             "free_cash_flow": fund.free_cash_flow,
             "fcf_yield": fcf_yield,
             "market_cap": fund.market_cap,
+            "shares_outstanding": fund.shares_outstanding,
             "sector": fund.sector,
             "sector_medians": medians,
             "component_scores": components,
