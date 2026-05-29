@@ -937,6 +937,8 @@ def _print_field_cheatsheet() -> None:
                 ("peg", "PEG (배)"),
                 ("dividend_yield", "배당수익률 (0.03 = 3%)"),
                 ("market_cap", "시가총액 (현지 통화)"),
+                ("market_cap_krw", "KRW 환산 시가총액 (cross-market 비교)"),
+                ("size_bucket", "규모 등급 (mega/large/mid/small/micro)"),
                 ("valuation_score", "Valuation 팩터 점수 0~100"),
             ],
         ),

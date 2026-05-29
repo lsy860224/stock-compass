@@ -24,6 +24,7 @@ from stock_compass.db.backtest import (
     list_backtest_results,
     save_backtest_result,
 )
+from stock_compass.db.meta import get_latest_ticker_meta, upsert_ticker_meta
 from stock_compass.db.migrations import MIGRATIONS, migrate
 from stock_compass.db.news import (
     NewsSummaryRow,
@@ -75,6 +76,7 @@ __all__ = [
     "get_db_connection",
     "get_last_score",
     "get_latest_scores",
+    "get_latest_ticker_meta",
     "get_performance_summary",
     "get_previous_composite_score",
     "get_previous_total_scores",
@@ -101,4 +103,5 @@ __all__ = [
     "upsert_composite_score",
     "upsert_news_summary",
     "upsert_ticker",
+    "upsert_ticker_meta",
 ]

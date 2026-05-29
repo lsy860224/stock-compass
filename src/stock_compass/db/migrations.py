@@ -14,6 +14,7 @@ from stock_compass.db.schema import (
     MIGRATION_004_CRAFT_PUBLICATIONS,
     MIGRATION_005_NEWS_CONCERNS,
     MIGRATION_006_BACKTEST_RESULTS,
+    MIGRATION_007_TICKER_META,
     SCREENER_VIEWS_DDL,
 )
 from stock_compass.utils.logging import get_logger
@@ -50,6 +51,12 @@ MIGRATIONS: Sequence[Migration] = (
         version=6,
         name="backtest_results",
         sql=MIGRATION_006_BACKTEST_RESULTS,
+    ),
+    # ticker_meta 생성 후 뷰 재실행 — 기존 DB도 v_latest_scores 가 size 칼럼 노출.
+    Migration(
+        version=7,
+        name="ticker_meta",
+        sql=MIGRATION_007_TICKER_META + "\n" + SCREENER_VIEWS_DDL,
     ),
 )
 
