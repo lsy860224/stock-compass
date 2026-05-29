@@ -952,6 +952,15 @@ def _print_field_cheatsheet() -> None:
             ],
         ),
         (
+            "Quality",
+            [
+                ("debt_to_equity", "부채비율 D/E (yfinance % 스케일, 낮을수록 양호)"),
+                ("current_ratio", "유동비율 (유동자산/유동부채, 높을수록 양호)"),
+                ("roa", "총자산이익률 (0.08 = 8%)"),
+                ("quality_score", "Quality 점수 0~100"),
+            ],
+        ),
+        (
             "Technical",
             [
                 ("rsi_14", "RSI(14)"),

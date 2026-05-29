@@ -252,15 +252,18 @@ stock-compass/
 
 ## 8) 점수 엔진
 
-### 5대 팩터 + 가중치 (기본값, config로 조정 가능)
+### 6대 팩터 + 가중치 (기본값, config로 조정 가능)
 
 | 팩터 | 가중치 | 지표 |
 |---|---|---|
-| Valuation | 30% | PER, PBR, PEG (업종 중앙값 대비) |
-| Fundamentals | 25% | 매출 YoY, 영업이익 YoY, ROE, FCF 마진 |
-| Technical | 20% | RSI(14), 200MA 이격률, 거래량 z-score |
-| Macro | 15% | 미국 10Y 금리·VIX·DXY (Risk-on/off) |
+| Valuation | 30% | PER, PBR, PEG, PSR, EV/EBITDA, P/FCF (업종 중앙값 대비) |
+| Fundamentals | 15% | 매출 YoY, 영업이익 YoY, ROE, 영업이익률, FCF yield |
+| Quality | 10% | 부채비율(D/E), 유동비율, ROA (재무 건전성, a2) |
+| Technical | 20% | RSI(14), 200MA 이격률, 거래량 z, MACD, ATR(14), 볼린저 %B |
+| Macro | 15% | 미국 10Y 금리·VIX·장단기 스프레드·USD/KRW (Risk-on/off) |
 | Sentiment | 10% | 최근 30일 뉴스·공시 톤 (Claude 요약 점수) |
+
+> Quality(a2) 신설 시 기존 Fundamentals 25% 를 F15 + Q10 으로 분할.
 
 ### 출력 규칙
 

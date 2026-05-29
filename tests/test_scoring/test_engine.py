@@ -26,6 +26,7 @@ class TestWeightedAverage:
         factors = [
             _mk("valuation", 100.0),
             _mk("fundamentals", 0.0),
+            _mk("quality", 0.0),
             _mk("technical", 0.0),
             _mk("macro", 0.0),
             _mk("sentiment", 0.0),
@@ -37,6 +38,7 @@ class TestWeightedAverage:
         factors = [
             _mk("valuation", 0.0),
             _mk("fundamentals", 0.0),
+            _mk("quality", 0.0),
             _mk("technical", 0.0),
             _mk("macro", 0.0),
             _mk("sentiment", 100.0),

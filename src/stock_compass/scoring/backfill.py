@@ -255,6 +255,8 @@ def _build_composite_at(
         if qf is not None
         else backfill_skip("fundamentals")
     )
+    # Quality: 시점별 대차대조표(부채·자산) 재구성 불가 → backfill_skip.
+    q = backfill_skip("quality")
     t = technical_factor.calculate_at_close(
         close_slice,
         volume_slice,
@@ -266,7 +268,7 @@ def _build_composite_at(
     m = macro_factor.calculate_at_date(market, series_cache, as_of)
     s = backfill_skip("sentiment")
 
-    factors: list[FactorScore] = [v, f, t, m, s]
+    factors: list[FactorScore] = [v, f, q, t, m, s]
     total_w = sum(fs.weight for fs in factors)
     total = (
         sum(fs.score * fs.weight for fs in factors) / total_w

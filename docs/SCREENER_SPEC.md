@@ -85,6 +85,7 @@ uv run stock-compass screen --interactive
 | verdict | TEXT | 관심권/중립/주의 |
 | valuation_score | REAL | factor_scores |
 | fundamentals_score | REAL | factor_scores |
+| quality_score | REAL | factor_scores |
 | technical_score | REAL | factor_scores |
 | macro_score | REAL | factor_scores |
 | sentiment_score | REAL | factor_scores |
@@ -98,6 +99,9 @@ uv run stock-compass screen --interactive
 | **ma200_distance** | REAL | 200일선 대비 이격률 |
 | **volume_zscore** | REAL | 20일 거래량 z-score |
 | **dividend_yield** | REAL | |
+| **debt_to_equity** | REAL | Quality raw — 부채/자본 (yfinance % 스케일) |
+| **current_ratio** | REAL | Quality raw — 유동자산/유동부채 |
+| **roa** | REAL | Quality raw — 총자산이익률 |
 | as_of_date | TEXT | 데이터 기준일 |
 
 ### 3.2 `v_score_history`
@@ -164,8 +168,12 @@ return_1m, return_3m, return_6m, return_12m
   operating_margin     영업이익률 (소수)
   net_margin           순이익률
   roe                  자기자본수익률 (소수)
-  roa                  총자산수익률
-  debt_to_equity       부채비율
+
+[Quality]
+  debt_to_equity       부채비율 D/E (yfinance % 스케일, 낮을수록↑)
+  current_ratio        유동비율 (유동자산/유동부채, 높을수록↑)
+  roa                  총자산이익률 (소수, 0.08 = 8%)
+  quality_score        Quality 팩터 점수 0~100
 
 [Technical]
   rsi_14               RSI(14)

@@ -185,6 +185,7 @@ def render_score_ranking(
     table.add_column("가격", justify="right")
     table.add_column("V", justify="right", style="dim")
     table.add_column("F", justify="right", style="dim")
+    table.add_column("Q", justify="right", style="dim")
     table.add_column("T", justify="right", style="dim")
     table.add_column("M", justify="right", style="dim")
     table.add_column("S", justify="right", style="dim")
@@ -211,6 +212,7 @@ def render_score_ranking(
                 price_str,
                 _short(f_map.get("valuation")),
                 _short(f_map.get("fundamentals")),
+                _short(f_map.get("quality")),
                 _short(f_map.get("technical")),
                 _short(f_map.get("macro")),
                 _short(f_map.get("sentiment")),
@@ -219,9 +221,10 @@ def render_score_ranking(
         table.add_row(*row_cells)
 
     console.print(table)
+    legend = "V=Valuation F=Fundamentals Q=Quality T=Technical M=Macro S=Sentiment"
     console.print(
         Panel(
-            f"{DISCLAIMER}  ·  V=Valuation F=Fundamentals T=Technical M=Macro S=Sentiment",
+            f"{DISCLAIMER}  ·  {legend}",
             title="면책",
             border_style="dim",
             padding=(0, 1),
@@ -263,6 +266,7 @@ def render_history(
     table.add_column("가격", justify="right", style="dim")
     table.add_column("V", justify="right")
     table.add_column("F", justify="right")
+    table.add_column("Q", justify="right")
     table.add_column("T", justify="right")
     table.add_column("M", justify="right")
     table.add_column("S", justify="right")
@@ -275,6 +279,7 @@ def render_history(
             f"{r.price_at_score:,.2f}" if r.price_at_score is not None else "—",
             _short(r.factor_scores.get("valuation")),
             _short(r.factor_scores.get("fundamentals")),
+            _short(r.factor_scores.get("quality")),
             _short(r.factor_scores.get("technical")),
             _short(r.factor_scores.get("macro")),
             _short(r.factor_scores.get("sentiment")),

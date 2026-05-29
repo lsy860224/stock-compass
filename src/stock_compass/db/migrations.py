@@ -15,6 +15,7 @@ from stock_compass.db.schema import (
     MIGRATION_005_NEWS_CONCERNS,
     MIGRATION_006_BACKTEST_RESULTS,
     MIGRATION_007_TICKER_META,
+    MIGRATION_008_QUALITY_FACTOR,
     SCREENER_VIEWS_DDL,
 )
 from stock_compass.utils.logging import get_logger
@@ -57,6 +58,12 @@ MIGRATIONS: Sequence[Migration] = (
         version=7,
         name="ticker_meta",
         sql=MIGRATION_007_TICKER_META + "\n" + SCREENER_VIEWS_DDL,
+    ),
+    # Quality 팩터 — factor_scores CHECK 재생성 후 뷰 재실행 (quality_score 칼럼 노출).
+    Migration(
+        version=8,
+        name="quality_factor",
+        sql=MIGRATION_008_QUALITY_FACTOR + "\n" + SCREENER_VIEWS_DDL,
     ),
 )
 

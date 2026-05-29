@@ -23,11 +23,19 @@ _logger = get_logger(__name__)
 _FACTOR_LABEL = {
     "valuation": "Valuation",
     "fundamentals": "Fundamentals",
+    "quality": "Quality",
     "technical": "Technical",
     "macro": "Macro",
     "sentiment": "Sentiment",
 }
-_FACTOR_ORDER = ("valuation", "fundamentals", "technical", "macro", "sentiment")
+_FACTOR_ORDER = (
+    "valuation",
+    "fundamentals",
+    "quality",
+    "technical",
+    "macro",
+    "sentiment",
+)
 
 # Δ 점수 변화의 신호도 임계 — 이만큼 변하면 highlight 섹션에 포함
 _DELTA_HIGHLIGHT_THRESHOLD = 5.0
