@@ -7,7 +7,12 @@ from typing import Annotated
 import typer
 
 from stock_compass.commands._app import app, console
-from stock_compass.commands._helpers import parse_market, resolve_targets, run_mixed
+from stock_compass.commands._helpers import (
+    parse_market,
+    resolve_targets,
+    resolve_universe_targets,
+    run_mixed,
+)
 from stock_compass.markets.base import Market
 from stock_compass.output.craft_exporter import PreviousScores, SectorRanks
 
@@ -61,11 +66,19 @@ def batch(
         str | None,
         typer.Option("--tickers", "-t", help="콤마 구분 직접 지정 (.env 워치리스트 무시)"),
     ] = None,
+    universe: Annotated[
+        str | None,
+        typer.Option(
+            "--universe",
+            "-u",
+            help="유니버스 코드 콤마 구분 채점 (예: ALL_KR,SP500). 워치리스트/--tickers 와 병합",
+        ),
+    ] = None,
     no_persist: Annotated[
         bool, typer.Option("--no-persist", help="DB 저장 생략 (드라이런)")
     ] = False,
 ) -> None:
-    """워치리스트 일일 배치 → SQLite 저장 + 점수 순위 출력."""
+    """워치리스트(또는 --universe) 배치 → SQLite 저장 + 점수 순위 출력."""
     from rich.progress import (
         BarColumn,
         Progress,
@@ -82,10 +95,20 @@ def batch(
     setup_logging(settings.log_dir)
 
     forced_market = parse_market(market)
-    targets = resolve_targets(tickers, forced_market, settings.watchlist_kr, settings.watchlist_us)
+    if universe:
+        # --universe 지정 시 유니버스 멤버를 대상으로 (--tickers/워치리스트는 무시)
+        targets = resolve_universe_targets(universe)
+        if forced_market is not None:
+            targets = [(t, m) for t, m in targets if m == forced_market]
+    else:
+        targets = resolve_targets(
+            tickers, forced_market, settings.watchlist_kr, settings.watchlist_us
+        )
 
     if not targets:
-        console.print("[yellow]대상 종목이 없습니다. WATCHLIST_KR/US 또는 --tickers 확인.[/yellow]")
+        console.print(
+            "[yellow]대상 종목이 없습니다. WATCHLIST_KR/US · --tickers · --universe 확인.[/yellow]"
+        )
         raise typer.Exit(code=2)
 
     console.print(

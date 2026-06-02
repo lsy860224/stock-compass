@@ -50,6 +50,46 @@ def resolve_targets(
     return out
 
 
+def resolve_universe_targets(universe_csv: str) -> list[tuple[str, Market]]:
+    """`--universe` 콤마 구분 코드 → (ticker, market) 목록 (중복 제거, 입력 순서 보존).
+
+    각 universe 의 최신 as_of 멤버를 사용. 같은 종목이 여러 universe 에 속하면
+    1회만 포함. 미지원 코드는 즉시 종료.
+    """
+    from stock_compass.db import get_db_connection
+    from stock_compass.screener.universes import (
+        SUPPORTED_UNIVERSES,
+        list_universe_members,
+    )
+
+    codes = [c.strip().upper() for c in universe_csv.split(",") if c.strip()]
+    unknown = [c for c in codes if c not in SUPPORTED_UNIVERSES]
+    if unknown:
+        console.print(
+            f"[red]지원하지 않는 universe: {', '.join(unknown)}[/red]\n"
+            f"[dim]지원: {', '.join(SUPPORTED_UNIVERSES)}[/dim]"
+        )
+        raise typer.Exit(code=2)
+
+    seen: set[tuple[str, Market]] = set()
+    out: list[tuple[str, Market]] = []
+    with get_db_connection() as conn:
+        for code in codes:
+            for r in list_universe_members(conn, universe_code=code):
+                market = str(r["market"])
+                if market not in _MARKET_VALUES:
+                    continue
+                pair: tuple[str, Market] = (str(r["code"]), market)  # type: ignore[assignment]
+                if pair not in seen:
+                    seen.add(pair)
+                    out.append(pair)
+    if not out:
+        console.print(
+            f"[yellow]universe {universe_csv} 멤버 없음 — `universe refresh` 먼저.[/yellow]"
+        )
+    return out
+
+
 def run_mixed(
     engine: ScoringEngine,
     tickers: list[str],

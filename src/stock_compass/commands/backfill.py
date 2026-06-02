@@ -12,18 +12,12 @@ from typing import Annotated
 import typer
 
 from stock_compass.commands._app import app, console
-from stock_compass.commands._helpers import parse_market
+from stock_compass.commands._helpers import parse_market, resolve_universe_targets
 from stock_compass.markets.base import Market
 
 
 @app.command()
 def backfill(
-    tickers: Annotated[
-        str,
-        typer.Option(
-            "--tickers", "-t", help="콤마 구분 종목 코드 (예: AAPL,MSFT,005930)"
-        ),
-    ],
     start: Annotated[
         str, typer.Option("--start", help="백필 시작일 YYYY-MM-DD")
     ],
@@ -36,6 +30,20 @@ def backfill(
     market: Annotated[
         str | None,
         typer.Option("--market", "-m", help="kr / us (자동 감지가 기본)"),
+    ] = None,
+    tickers: Annotated[
+        str | None,
+        typer.Option(
+            "--tickers", "-t", help="콤마 구분 종목 코드 (예: AAPL,MSFT,005930)"
+        ),
+    ] = None,
+    universe: Annotated[
+        str | None,
+        typer.Option(
+            "--universe",
+            "-u",
+            help="유니버스 코드 콤마 구분 (예: ALL_KR,SP500). --tickers 대신 사용",
+        ),
     ] = None,
 ) -> None:
     """과거 OHLCV + FRED 시계열로 시점별 점수 백필 — backtest 입력 확보."""
@@ -60,9 +68,8 @@ def backfill(
 
     setup_logging(settings.log_dir)
 
-    codes = [c.strip() for c in tickers.split(",") if c.strip()]
-    if not codes:
-        console.print("[red]--tickers 비어 있음[/red]")
+    if not tickers and not universe:
+        console.print("[red]--tickers 또는 --universe 중 하나 필요[/red]")
         raise typer.Exit(code=2)
 
     try:
@@ -73,9 +80,17 @@ def backfill(
         raise typer.Exit(code=2) from e
 
     forced = parse_market(market)
-    targets: list[tuple[str, Market]] = [
-        (c, forced or detect_market(c)) for c in codes
-    ]
+    if universe:
+        targets = resolve_universe_targets(universe)
+        if forced is not None:
+            targets = [(t, m) for t, m in targets if m == forced]
+    else:
+        codes = [c.strip() for c in (tickers or "").split(",") if c.strip()]
+        targets = [(c, forced or detect_market(c)) for c in codes]
+
+    if not targets:
+        console.print("[red]대상 종목 없음 — --tickers/--universe 확인[/red]")
+        raise typer.Exit(code=2)
 
     console.print(
         f"[cyan]backfill[/cyan] {len(targets)}종목 · {start_d} ~ {end_d}"
