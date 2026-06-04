@@ -6,6 +6,25 @@
 
 ---
 
+## ⚠️ 현재 실제 구조 (refactor 후) — 이 문서는 "최초 빌드 플레이북"
+
+> 아래 Phase 프롬프트는 **최초 구현 당시의 빌드 순서**를 보존한 기록이다. 구현 완료
+> 후 코드베이스는 관심사별 패키지로 **리팩토링**되었으므로, **현재 레이아웃의 정전은
+> `CLAUDE.md` §4 "파일 구조"**다. Phase 프롬프트의 파일 경로와 다음이 다르니 주의:
+
+| Phase 프롬프트 표기 | 현재 실제 위치 |
+|---|---|
+| `cli.py`에 명령 구현 | `cli.py`는 **얇은 facade** — 명령은 `commands/*` (비대 명령은 `commands/<group>/` 패키지: `scoring`·`screener`·`trade`) |
+| `db/repository.py` | 도메인별 분해 — `db/{tickers,scores,sectors,trades,trade_hindsight,news,alerts,…}.py` (`db/__init__.py`가 re-export) |
+| `output/exporter.py` | `output/screener.py`(CSV/JSON) · `output/craft_exporter.py`+`_craft_sections.py` 등 |
+| `dashboard.py` | `dashboard/app.py`(entrypoint) + `dashboard/views/*`(페이지별, ★ `pages/` 금지) |
+| `screener/repl.py` | 미구현 (선택 Phase 7-6) |
+
+> 분해 원칙(300줄 가이드·`__init__` re-export 보존·미분할 대상)은 `CLAUDE.md` §4 참조.
+> 새 기능은 Phase 프롬프트가 아니라 **현재 구조 + `CLAUDE.md` 경로 규칙**을 따른다.
+
+---
+
 ## 사전 준비 (Day -1)
 
 1. **macOS Homebrew 설치 확인**: `brew --version`
@@ -639,12 +658,17 @@ SCREENER_SPEC 9) 참고:
 
 ## Phase 8 (선택): Streamlit 로컬 대시보드 (Day 10+, 4시간)
 
+> 구현됨. 실행: `uv run stock-compass dashboard` (또는
+> `streamlit run src/stock_compass/dashboard/app.py`). 페이지는
+> `dashboard/views/*` 에 분리 (Overview·Tracked·History·Reports·Trades·
+> Backtest·Backtest History). optional dep — `uv sync --extra dashboard`.
+
 ```
-streamlit run dashboard.py:
-- 점수 히트맵 (워치리스트 전체 × 5팩터)
-- 종목별 30일 점수 추이 차트 (altair)
-- 본인 매매 vs 점수 산점도 (편향 시각화)
-- 알림 이력 타임라인
+dashboard/app.py (entrypoint) → views/:
+- Overview: 워치리스트 점수 순위 + sector 평균
+- History: 종목별 점수 추이 + 5팩터 분해 (altair)
+- Trades: 매매 일지 + hindsight forward return
+- Backtest / Backtest History: preset 백테스트 실행·저장 이력
 - 모든 페이지에 면책 footer
 ```
 
