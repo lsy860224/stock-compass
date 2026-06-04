@@ -14,6 +14,16 @@ Market = Literal["KR", "US"]
 Currency = Literal["KRW", "USD"]
 
 
+def pct_to_fraction(value: float | None) -> float | None:
+    """percent-point → fraction 변환 (1.86 → 0.0186).
+
+    yfinance `dividendYield`는 신버전에서 percent-point(1.86 = 1.86%)를 반환하나,
+    Fundamentals 규약(roe·revenue_growth_yoy 등)은 모두 fraction(0~1)이다. 일관성을
+    위해 어댑터 경계에서 정규화한다.
+    """
+    return value / 100.0 if value is not None else None
+
+
 class PriceHistory(BaseModel):
     """일별 OHLCV 시계열.
 

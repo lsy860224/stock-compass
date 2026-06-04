@@ -16,6 +16,7 @@ from stock_compass.markets.base import (
     News,
     PriceHistory,
     QuarterlyFinancials,
+    pct_to_fraction,
 )
 from stock_compass.markets.us import UsAdapter, _get, _parse_news_time
 from stock_compass.utils.cache import (
@@ -310,7 +311,7 @@ class KrAdapter(MarketAdapter):
             peg=_get(info, "pegRatio", "trailingPegRatio", as_=float),
             psr=_get(info, "priceToSalesTrailing12Months", as_=float),
             ev_ebitda=_get(info, "enterpriseToEbitda", as_=float),
-            dividend_yield=_get(info, "dividendYield", as_=float),
+            dividend_yield=pct_to_fraction(_get(info, "dividendYield", as_=float)),
             roe=_get(info, "returnOnEquity", as_=float),
             revenue_growth_yoy=_get(info, "revenueGrowth", as_=float),
             earnings_growth_yoy=_get(info, "earningsGrowth", as_=float),
@@ -332,11 +333,27 @@ class KrAdapter(MarketAdapter):
         )
 
     def _fetch_fundamentals_pykrx(self, code: str) -> dict[str, float | None]:
-        from pykrx.stock import get_market_fundamental, get_nearest_business_day_in_a_week
+        """KR PER/PBR 보강 — pykrx `get_market_fundamental` 사용.
+
+        pykrx 1.2.x 는 이 엔드포인트에 KRX 로그인(`KRX_ID`/`KRX_PW`)을 요구한다.
+        자격증명이 없으면 즉시 빈 dict 반환 — 종목마다 로그인 실패 배너·경고를
+        뿜지 않도록 단축한다 (yfinance KR 은 PER/PBR 미제공 → per/pbr 은 None 유지,
+        valuation 팩터는 peg/psr/ev_ebitda sector-relative 로 폴백).
+        """
+        from stock_compass.utils.krx_auth import apply_krx_credentials, krx_quiet
+
+        if not apply_krx_credentials():
+            return {}  # KRX 자격증명 없음 — 정확 PER/PBR 조회 불가, 조용히 skip
 
         try:
-            day = get_nearest_business_day_in_a_week()
-            df = get_market_fundamental(day, day, code)
+            with krx_quiet():
+                from pykrx.stock import (
+                    get_market_fundamental,
+                    get_nearest_business_day_in_a_week,
+                )
+
+                day = get_nearest_business_day_in_a_week()
+                df = get_market_fundamental(day, day, code)
             if df.empty:
                 return {}
             row = df.iloc[-1]

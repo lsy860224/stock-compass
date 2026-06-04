@@ -15,8 +15,9 @@ FROM v_latest_scores
 WHERE market = 'US'
   AND (universes LIKE '%SP500%' OR universes LIKE '%NASDAQ_100%')
   AND ma200_distance BETWEEN 0.05 AND 0.30      -- 5~30% 위
-  AND volume_zscore >= 1.0                       -- 평균 이상 거래량
+  AND volume_zscore >= 0.5                       -- 평균 이상 거래량 (모멘텀 초입 포함)
   AND rsi_14 BETWEEN 50 AND 70                   -- 과매수 제외
-  AND composite_score >= 65
+  AND composite_score >= 50                      -- 모멘텀주는 valuation에 눌려 composite가 낮음
+                                                 -- → 절대 고점수(>=65) 요구는 부적절, '주의'(<50)만 제외
 ORDER BY (ma200_distance + volume_zscore / 10) DESC
 LIMIT 15;

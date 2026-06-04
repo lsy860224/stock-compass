@@ -16,6 +16,7 @@ from stock_compass.markets.base import (
     PriceHistory,
     QuarterlyDatum,
     QuarterlyFinancials,
+    pct_to_fraction,
 )
 from stock_compass.utils.cache import (
     cache_key_for_today,
@@ -113,7 +114,7 @@ class UsAdapter(MarketAdapter):
             peg=_get(info, "pegRatio", "trailingPegRatio", as_=float),
             psr=_get(info, "priceToSalesTrailing12Months", as_=float),
             ev_ebitda=_get(info, "enterpriseToEbitda", as_=float),
-            dividend_yield=_get(info, "dividendYield", as_=float),
+            dividend_yield=pct_to_fraction(_get(info, "dividendYield", as_=float)),
             roe=_get(info, "returnOnEquity", as_=float),
             revenue_growth_yoy=_get(info, "revenueGrowth", as_=float),
             earnings_growth_yoy=_get(info, "earningsGrowth", as_=float),

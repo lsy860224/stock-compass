@@ -5,7 +5,8 @@
 WITH past_scores AS (
   SELECT
     ticker_id,
-    composite_score AS past_score
+    total_score AS past_score   -- raw composite_scores 테이블 컬럼명은 total_score
+                                 -- (v_latest_scores 뷰에서만 composite_score 로 노출)
   FROM composite_scores
   WHERE date = (
     SELECT MAX(date) FROM composite_scores WHERE date <= date('now', '-30 days')
