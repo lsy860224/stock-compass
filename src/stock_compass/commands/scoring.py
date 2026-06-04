@@ -210,17 +210,21 @@ def resolve_task(task: str, hour: int, *, weekday: int | None = None) -> str:
     Returns: us/kr/daily/all/weekly
     """
     t = task.lower()
-    if t in ("us", "kr", "daily", "all", "weekly"):
+    if t in ("us", "kr", "daily", "all", "weekly", "weekly-rescore"):
         return t
     if t != "auto":
         raise typer.BadParameter(
-            f"--task는 auto/us/kr/daily/all/weekly 중 하나: {task!r}"
+            f"--task는 auto/us/kr/daily/all/weekly/weekly-rescore 중 하나: {task!r}"
         )
     if weekday is None:
         from stock_compass.utils.dates import now_kst
 
         weekday = now_kst().weekday()
-    # 토요일(5) 08:00 → 주간 발굴 (plist Weekday=7, Hour=8)
+    # 토요일(5) 05:00 → 유니버스 주간 재채점 (weekly-discover 전 신선화). hour==5 가
+    # 아래 us 분기(5<=hour<7)에 잡히기 전에 먼저 매칭.
+    if weekday == 5 and hour == 5:
+        return "weekly-rescore"
+    # 토요일(5) 08:00 → 주간 발굴 (plist Weekday=6, Hour=8)
     if weekday == 5 and hour == 8:
         return "weekly"
     # 시각 분기 — plist (06:30 / 07:00 / 16:30) 매칭, ±1h 관용
@@ -265,6 +269,11 @@ def _run_scheduled_task(task: str, *, dry_run: bool) -> int:
             return 0
         result = subprocess.run(cmd, check=False)
         return result.returncode
+
+    # 유니버스 주간 재채점 — weekly-discover(08:00) 전 v_latest_scores 신선화.
+    # 점수만 갱신(알림·Craft·백업 생략) — 853종목 알림 폭주 방지.
+    if task == "weekly-rescore":
+        return _run_universe_rescore(dry_run=dry_run)
 
     if task in ("us", "kr", "all"):
         forced: Market | None = (
@@ -365,6 +374,71 @@ def _run_scheduled_task(task: str, *, dry_run: bool) -> int:
                 )
 
     return exit_code
+
+
+# 주간 재채점 대상 유니버스 (KR 먼저 → US 나중: US 금요일 종가 신선도 확보).
+_WEEKLY_RESCORE_UNIVERSES = "ALL_KR,SP500"
+# 853종목 풀 API sentiment 1회분(in+out 합산 ~1.5M)을 수용하도록 이 실행에 한해
+# 일일 한도 상향 — settings 객체만 변경(프로세스 스코프), plist env·.env 불변.
+_WEEKLY_RESCORE_INPUT_LIMIT = 20_000_000
+
+
+def _run_universe_rescore(*, dry_run: bool) -> int:
+    """유니버스(ALL_KR+SP500) 전체 재채점 → composite_scores 신선화. 0=전건 성공."""
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        TaskProgressColumn,
+        TextColumn,
+        TimeElapsedColumn,
+    )
+
+    from stock_compass.config import settings
+    from stock_compass.scoring import ScoringEngine
+    from stock_compass.utils.dates import today_kst
+
+    targets = resolve_universe_targets(_WEEKLY_RESCORE_UNIVERSES)
+    if not targets:
+        console.print(
+            "[yellow]유니버스 멤버 없음 — `universe refresh` 먼저.[/yellow]"
+        )
+        return 1
+
+    if dry_run:
+        kr = sum(1 for _, m in targets if m == "KR")
+        console.print(
+            f"[dim]dry-run: 유니버스 재채점 {len(targets)}종목 "
+            f"(KR={kr}, US={len(targets) - kr}), 한도={_WEEKLY_RESCORE_INPUT_LIMIT:,}[/dim]"
+        )
+        return 0
+
+    # 풀 API sentiment 보장 — 기본 500k 한도면 ~120종목 후 fallback(50)으로 끊김.
+    settings.anthropic_daily_input_limit = max(
+        settings.anthropic_daily_input_limit, _WEEKLY_RESCORE_INPUT_LIMIT
+    )
+
+    engine = ScoringEngine()
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("•"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        results = run_mixed(
+            engine,
+            [t for t, _ in targets],
+            dict(targets),
+            progress,
+            persist=True,
+        )
+
+    console.print(
+        f"[green]✓[/green] 유니버스 재채점 {len(results)}/{len(targets)}종목 "
+        f"(date={today_kst().isoformat()})"
+    )
+    return 0 if len(results) == len(targets) else 1
 
 
 def _previous_scores_for(

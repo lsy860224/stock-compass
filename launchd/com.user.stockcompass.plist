@@ -123,6 +123,15 @@
       <key>Minute</key><integer>30</integer>
     </dict>
 
+    <!-- 유니버스 주간 재채점 (토요일 05:00 KST). weekly-discover(08:00) 전 853종목
+         composite 신선화 → v_latest_scores 갱신. ~45-60분 소요(06:30 US 배치 전 종료).
+         DB busy_timeout 미설정이라 다른 쓰기 잡과 안 겹치게 05:00 단독 슬롯 사용. -->
+    <dict>
+      <key>Weekday</key><integer>6</integer>
+      <key>Hour</key><integer>5</integer>
+      <key>Minute</key><integer>0</integer>
+    </dict>
+
     <!-- 주간 종목 발굴 (토요일 08:00 KST). launchd 컨벤션: 0/7=일요일, 1=월…6=토. -->
     <dict>
       <key>Weekday</key><integer>6</integer>
