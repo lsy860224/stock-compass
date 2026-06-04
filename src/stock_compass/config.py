@@ -121,6 +121,8 @@ class Settings(BaseSettings):
 
     # ─── 스크리너 ───
     screener_default_limit: int = 50
+    # weekly-discover 가 'discover' 추적 그룹에 자동 등록할 preset별 상위 종목 수.
+    discover_track_top_n: int = 5
 
     @field_validator("watchlist_kr", "watchlist_us", mode="before")
     @classmethod

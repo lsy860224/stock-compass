@@ -12,6 +12,7 @@ from stock_compass.commands import (  # noqa: F401 — 등록 트리거
     scoring,
     screener,
     sentiment,
+    track,
     trade,
     universe,
 )

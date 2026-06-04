@@ -10,6 +10,7 @@ import typer
 from stock_compass.commands._app import app, console
 from stock_compass.commands._helpers import (
     parse_market,
+    resolve_default_targets,
     resolve_targets,
     resolve_universe_targets,
     run_mixed,
@@ -101,14 +102,18 @@ def batch(
         targets = resolve_universe_targets(universe)
         if forced_market is not None:
             targets = [(t, m) for t, m in targets if m == forced_market]
-    else:
+    elif tickers:
         targets = resolve_targets(
             tickers, forced_market, settings.watchlist_kr, settings.watchlist_us
         )
+    else:
+        # 기본: .env 워치리스트 + DB 추적 종목 (discover 포함)
+        targets = resolve_default_targets(forced_market)
 
     if not targets:
         console.print(
-            "[yellow]대상 종목이 없습니다. WATCHLIST_KR/US · --tickers · --universe 확인.[/yellow]"
+            "[yellow]대상 종목이 없습니다. "
+            "WATCHLIST_KR/US · --tickers · --universe · track add 확인.[/yellow]"
         )
         raise typer.Exit(code=2)
 
@@ -250,7 +255,6 @@ def _run_scheduled_task(task: str, *, dry_run: bool) -> int:
     )
 
     from stock_compass.alerts import default_manager
-    from stock_compass.config import settings
     from stock_compass.db import get_db_connection
     from stock_compass.output.craft import CraftExporter
     from stock_compass.output.terminal import render_score_ranking
@@ -280,12 +284,11 @@ def _run_scheduled_task(task: str, *, dry_run: bool) -> int:
         forced: Market | None = (
             "US" if task == "us" else "KR" if task == "kr" else None
         )
-        targets = resolve_targets(
-            None, forced, settings.watchlist_kr, settings.watchlist_us
-        )
+        # .env 워치리스트 + DB 추적 종목 (discover 포함) 자동 채점
+        targets = resolve_default_targets(forced)
         if not targets:
             console.print(
-                f"[yellow]task={task} — 대상 종목 없음 (워치리스트 확인)[/yellow]"
+                f"[yellow]task={task} — 대상 종목 없음 (워치리스트/추적 확인)[/yellow]"
             )
             return 1
 

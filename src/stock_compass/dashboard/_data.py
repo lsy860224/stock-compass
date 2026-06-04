@@ -139,6 +139,31 @@ def fetch_trades_recent(*, days: int = 90) -> list[Trade]:
         return get_trades(conn, days=days)
 
 
+def fetch_tracked() -> list[dict[str, Any]]:
+    """추적 종목(watchlists) + 각 종목 최신 composite 점수 조인 — Tracked 페이지용."""
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT t.code, t.market, t.name, t.sector,
+                   w.group_name, w.added_by, w.notes, w.added_at,
+                   lc.total_score, lc.verdict, lc.date AS score_date
+            FROM watchlists w
+            JOIN tickers t ON t.id = w.ticker_id
+            LEFT JOIN (
+                SELECT cs.ticker_id, cs.total_score, cs.verdict, cs.date
+                FROM composite_scores cs
+                JOIN (
+                    SELECT ticker_id, MAX(date) AS d
+                    FROM composite_scores GROUP BY ticker_id
+                ) m ON cs.ticker_id = m.ticker_id AND cs.date = m.d
+            ) lc ON lc.ticker_id = w.ticker_id
+            ORDER BY w.group_name,
+                     (lc.total_score IS NULL), lc.total_score DESC, t.code
+            """
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def fetch_hindsight(
     *,
     days: int = 365,

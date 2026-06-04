@@ -17,6 +17,8 @@ trade_app = typer.Typer(help="매매 일지 — 입력·조회·편향 분석.")
 app.add_typer(trade_app, name="trade")
 universe_app = typer.Typer(help="유니버스 — refresh / list.")
 app.add_typer(universe_app, name="universe")
+track_app = typer.Typer(help="추적 종목 — .env 외 종목을 DB로 영속 추적 (add/remove/list).")
+app.add_typer(track_app, name="track")
 
 console = Console()
 

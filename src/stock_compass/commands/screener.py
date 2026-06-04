@@ -357,11 +357,19 @@ def weekly_discover(
     limit_per_preset: Annotated[
         int, typer.Option("--limit", help="preset당 결과 행 수 (기본 15)")
     ] = 15,
+    track: Annotated[
+        bool,
+        typer.Option(
+            "--track/--no-track",
+            help="발굴 상위 종목을 'discover' 추적 그룹에 자동 등록 (다음 배치부터 채점)",
+        ),
+    ] = True,
 ) -> None:
     """주간 종목 발굴 — 3개 preset 실행 + 통합 Craft 노트.
 
     토요일 아침 launchd가 호출하는 일괄 발굴 흐름. 각 preset 결과는
-    한 Craft 노트의 별도 섹션으로 묶임.
+    한 Craft 노트의 별도 섹션으로 묶임. --track 이면 상위 종목을 'discover'
+    추적 그룹에 등록 → 일일 배치가 자동 채점·히스토리 축적.
     """
     from stock_compass.config import settings
     from stock_compass.db import get_db_connection
@@ -406,6 +414,7 @@ def weekly_discover(
         "> 매주 자동 발굴된 후보 종목 — **매수 권유 아님.** 본인 추가 조사 필수.",
     ]
     total_found = 0
+    tracked_total = 0
     for name in requested_names:
         try:
             sql = load_preset(name)
@@ -420,6 +429,10 @@ def weekly_discover(
             continue
 
         total_found += result.row_count
+        if track and result.rows:
+            tracked_total += _track_discover_rows(
+                name, result.rows, settings.discover_track_top_n
+            )
         sections.append(f"\n## 🔍 {name} — {result.row_count}건")
 
         # 모델 신뢰도 검증 — 지난 1년 backtest 적중률 + 평균 수익률 한 줄
@@ -448,6 +461,7 @@ def weekly_discover(
     console.print(
         f"\n[cyan]주간 발굴 완료[/cyan] — {len(requested_names)}개 preset, "
         f"총 {total_found}건"
+        + (f" · 'discover' 추적 {tracked_total}종목 등록" if track else "")
     )
 
     if publish_craft:
@@ -824,36 +838,58 @@ def _fmt_pct(v: float | None, *, force_color: bool = False) -> str:
 def _add_screener_to_watchlist(
     rows: list[dict[str, Any]], *, group: str
 ) -> None:
-    """`screen --add-to-watchlist` — 결과 종목을 WATCHLIST_<GROUP> universe에 등록."""
-    from stock_compass.db import get_db_connection
-    from stock_compass.screener.universes import (
-        add_to_watchlist_group,
-    )
+    """`screen --add-to-watchlist` — 결과 종목을 추적 그룹(watchlists)에 등록.
+
+    추적 등록 즉시 일일 배치(.env + 추적)가 자동 채점 → 별도 .env 수정 불필요.
+    """
+    from stock_compass.db import get_db_connection, track_ticker
 
     targets = screener_rows_to_targets(rows, default_market=None)
     if not targets:
-        console.print(
-            "[yellow]code/market 컬럼 없어 워치리스트 추가 생략.[/yellow]"
-        )
+        console.print("[yellow]code/market 컬럼 없어 추적 추가 생략.[/yellow]")
         return
 
-    pairs: list[tuple[str, Market, str | None, str | None]] = [
-        (code, market, None, None) for code, market in targets
-    ]
-    try:
-        with get_db_connection() as conn:
-            r = add_to_watchlist_group(conn, group, pairs)
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
-        raise typer.Exit(code=2) from e
+    added = 0
+    with get_db_connection() as conn:
+        for code, market in targets:
+            if track_ticker(
+                conn,
+                code=code,
+                market=market,
+                group=group,
+                added_by="screen",
+                notes="screen --add-to-watchlist",
+            ):
+                added += 1
 
     console.print(
-        f"[green]✓[/green] [cyan]{r.universe_code}[/cyan] — "
-        f"{r.members}종목 신규 등록 (대상 {len(pairs)}, 기존 멤버는 dedup)"
+        f"[green]✓[/green] '[cyan]{group}[/cyan]' 추적 그룹 — "
+        f"{added}/{len(targets)}종목 신규 등록 (다음 배치부터 자동 채점)"
     )
-    console.print(
-        "[dim]자동 batch 추적은 .env의 WATCHLIST_KR/US에 직접 추가 필요.[/dim]"
-    )
+
+
+def _track_discover_rows(
+    preset_name: str, rows: list[dict[str, Any]], top_n: int
+) -> int:
+    """weekly-discover 상위 top_n 종목을 'discover' 추적 그룹에 등록. 신규 수 반환."""
+    from stock_compass.db import get_db_connection, track_ticker
+
+    targets = screener_rows_to_targets(rows[:top_n], default_market=None)
+    if not targets:
+        return 0
+    added = 0
+    with get_db_connection() as conn:
+        for code, market in targets:
+            if track_ticker(
+                conn,
+                code=code,
+                market=market,
+                group="discover",
+                added_by="discover",
+                notes=f"preset:{preset_name}",
+            ):
+                added += 1
+    return added
 
 
 def _generate_deepdive_prompt(

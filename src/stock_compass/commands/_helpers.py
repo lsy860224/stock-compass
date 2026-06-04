@@ -50,6 +50,34 @@ def resolve_targets(
     return out
 
 
+def resolve_default_targets(forced_market: Market | None) -> list[tuple[str, Market]]:
+    """배치 기본 대상 = `.env` 워치리스트 + DB 추적 종목(watchlists). 중복 제거.
+
+    .env(WATCHLIST_KR/US) 가 우선 순서, 그다음 DB 추적 종목. forced_market 지정 시
+    해당 시장만. 추적 종목 등록 즉시 일일 배치가 자동 채점하도록 하는 진입점.
+    """
+    from stock_compass.config import settings
+    from stock_compass.db import get_db_connection, get_tracked_targets
+
+    seen: set[tuple[str, Market]] = set()
+    out: list[tuple[str, Market]] = []
+    for pair in resolve_targets(
+        None, forced_market, settings.watchlist_kr, settings.watchlist_us
+    ):
+        if pair not in seen:
+            seen.add(pair)
+            out.append(pair)
+    with get_db_connection() as conn:
+        for code, market in get_tracked_targets(conn):
+            if forced_market is not None and market != forced_market:
+                continue
+            pair = (code, market)
+            if pair not in seen:
+                seen.add(pair)
+                out.append(pair)
+    return out
+
+
 def resolve_universe_targets(universe_csv: str) -> list[tuple[str, Market]]:
     """`--universe` 콤마 구분 코드 → (ticker, market) 목록 (중복 제거, 입력 순서 보존).
 
