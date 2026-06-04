@@ -115,10 +115,10 @@ module = [
 ]
 ignore_missing_imports = true
 
-# 대시보드 app 은 optional dep (streamlit/altair) — strict 검사 대신
+# 대시보드 app·views 는 optional dep (streamlit/altair) — strict 검사 대신
 # 누락 import 무시 + 미타입 호출 허용 (streamlit/altair 자체가 타입 약함)
 [[tool.mypy.overrides]]
-module = ["stock_compass.dashboard.app"]
+module = ["stock_compass.dashboard.app", "stock_compass.dashboard.views.*"]
 disallow_untyped_calls = false
 disallow_untyped_defs = false
 disallow_untyped_decorators = false

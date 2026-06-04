@@ -42,24 +42,28 @@ from stock_compass.db.scores import (
     get_previous_total_scores,
     get_score_history,
     get_scores_on_date,
+    upsert_composite_score,
+)
+from stock_compass.db.sectors import (
     get_sector_fundamental_medians,
     get_sector_score_rank,
     get_sector_valuation_medians,
-    upsert_composite_score,
 )
 from stock_compass.db.tickers import (
     get_ticker_id,
     upsert_ticker,
 )
-from stock_compass.db.trades import (
+from stock_compass.db.trade_hindsight import (
     DEFAULT_HINDSIGHT_DAYS,
-    Trade,
     TradeWithHindsight,
-    get_performance_summary,
     get_trade_hindsight,
+    summarize_hindsight,
+)
+from stock_compass.db.trades import (
+    Trade,
+    get_performance_summary,
     get_trades,
     insert_trade,
-    summarize_hindsight,
 )
 from stock_compass.db.watchlist import (
     add_tracked,
