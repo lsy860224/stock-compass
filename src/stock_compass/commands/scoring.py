@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date as date_cls
 from typing import Annotated
 
 import typer
@@ -312,6 +313,8 @@ def _run_scheduled_task(task: str, *, dry_run: bool) -> int:
             render_score_ranking(
                 results, console=console, previous_scores=previous
             )
+            if not dry_run:
+                _publish_batch_reports(results, today_kst())
 
     manager = default_manager()
     with get_db_connection() as conn:
@@ -322,6 +325,8 @@ def _run_scheduled_task(task: str, *, dry_run: bool) -> int:
         f"[cyan]alert[/cyan] fired={delivered} deduped={deduped}"
         + (" [dim](dry-run)[/dim]" if dry_run else "")
     )
+    if delivered and not dry_run:
+        _publish_alerts_report(fired, today_kst())
 
     if task in ("daily", "all"):
         with get_db_connection() as conn:
@@ -352,16 +357,32 @@ def _run_scheduled_task(task: str, *, dry_run: bool) -> int:
                             sector_ranks[(s.ticker, s.market)] = r
             token_usage = get_today_token_usage(conn, mode="api", on_date=on_date)
         if scores and not dry_run:
-            path = CraftExporter().export(
+            exporter = CraftExporter()
+            path = exporter.export(
                 scores,
                 on_date,
                 previous_scores=previous,
                 sector_ranks=sector_ranks,
                 token_usage=token_usage,
             )
-            console.print(f"[green]✓[/green] Craft 노트: [cyan]{path}[/cyan]")
+            console.print(f"[green]✓[/green] craft_export 파일: [cyan]{path}[/cyan]")
+            # dual-sink: Obsidian 볼트 + Craft API (파일 export와 동일 본문)
+            content = exporter.render_daily_note(
+                scores,
+                on_date,
+                previous_scores=previous,
+                sector_ranks=sector_ranks,
+                token_usage=token_usage,
+            )
+            _publish_via_sinks(
+                content,
+                on_date=on_date,
+                kind="daily",
+                title=f"stock-compass · daily · {on_date.isoformat()}",
+                filename=on_date.isoformat(),
+            )
         elif not scores:
-            console.print("[yellow]오늘 스냅샷 없음 — Craft 노트 생략[/yellow]")
+            console.print("[yellow]오늘 스냅샷 없음 — 일일 노트 생략[/yellow]")
 
         # CLAUDE.md 6) Phase 5 — daily 잡 직후 DB 자동 백업
         if not dry_run:
@@ -434,11 +455,89 @@ def _run_universe_rescore(*, dry_run: bool) -> int:
             persist=True,
         )
 
+    on_date = today_kst()
     console.print(
         f"[green]✓[/green] 유니버스 재채점 {len(results)}/{len(targets)}종목 "
-        f"(date={today_kst().isoformat()})"
+        f"(date={on_date.isoformat()})"
     )
+    if results:
+        from stock_compass.output.report_render import render_rescore_summary
+
+        iso_year, iso_week, _ = on_date.isocalendar()
+        _publish_via_sinks(
+            render_rescore_summary(results, on_date),
+            on_date=on_date,
+            kind="weekly-rescore",
+            title=f"stock-compass · weekly-rescore · {on_date.isoformat()}",
+            filename=f"{iso_year}-W{iso_week:02d} 재채점",
+        )
     return 0 if len(results) == len(targets) else 1
+
+
+def _publish_via_sinks(
+    content: str,
+    *,
+    on_date: date_cls,
+    kind: str,
+    title: str,
+    filename: str,
+) -> None:
+    """publish_report(Obsidian + Craft) 호출 + 결과 콘솔 출력 — 자동화 공용."""
+    from stock_compass.output.report import publish_report
+
+    result = publish_report(
+        content, on_date=on_date, kind=kind, title=title, filename=filename
+    )
+    if result.obsidian_path is not None:
+        console.print(
+            f"[green]✓[/green] Obsidian: [cyan]{result.obsidian_path.name}[/cyan]"
+        )
+    if result.craft_url:
+        console.print(f"[green]✓[/green] Craft: [cyan]{result.craft_url}[/cyan]")
+    elif result.craft_skipped:
+        console.print(f"[dim]Craft 발행 skip ({result.craft_skipped})[/dim]")
+    if not result.any_delivered:
+        console.print(f"[yellow]보고 sink 전부 미발행 ({kind})[/yellow]")
+
+
+def _publish_batch_reports(
+    results: list,  # type: ignore[type-arg]
+    on_date: date_cls,
+) -> None:
+    """장 마감 배치 결과를 시장별로 분리해 보고 발행 (batch-us / batch-kr)."""
+    from collections import defaultdict
+
+    from stock_compass.output.report_render import render_batch_note
+
+    groups: dict[Market, list] = defaultdict(list)  # type: ignore[type-arg]
+    for s in results:
+        groups[s.market].append(s)
+    for market, market_scores in groups.items():
+        content = render_batch_note(market_scores, market, on_date)
+        _publish_via_sinks(
+            content,
+            on_date=on_date,
+            kind=f"batch-{market.lower()}",
+            title=f"stock-compass · batch {market} · {on_date.isoformat()}",
+            filename=f"{on_date.isoformat()} {market}",
+        )
+
+
+def _publish_alerts_report(
+    fired: list,  # type: ignore[type-arg]
+    on_date: date_cls,
+) -> None:
+    """발화된 알림 요약 보고 발행."""
+    from stock_compass.output.report_render import render_alerts_note
+
+    content = render_alerts_note(fired, on_date)
+    _publish_via_sinks(
+        content,
+        on_date=on_date,
+        kind="alerts",
+        title=f"stock-compass · alerts · {on_date.isoformat()}",
+        filename=f"{on_date.isoformat()} 알림",
+    )
 
 
 def _previous_scores_for(

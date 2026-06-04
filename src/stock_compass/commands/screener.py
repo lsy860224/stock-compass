@@ -365,11 +365,6 @@ def weekly_discover(
     """
     from stock_compass.config import settings
     from stock_compass.db import get_db_connection
-    from stock_compass.output.craft import (
-        CraftAPIError,
-        CraftAuthError,
-        CraftPublisher,
-    )
     from stock_compass.screener import (
         PresetNotFoundError,
         ScreenerEngine,
@@ -456,25 +451,31 @@ def weekly_discover(
     )
 
     if publish_craft:
-        if settings.craft_api_token is None:
-            console.print("[yellow]CRAFT_API_TOKEN 미설정 — 발행 생략[/yellow]")
-            return
-        try:
-            publisher = CraftPublisher()
-            publish_result = publisher.publish_daily_note(
-                body,
-                today_kst(),
-                note_kind="weekly-discover",
-                title=f"주간 발굴 · {today_kst().isoformat()}",
-            )
-            action = "갱신" if publish_result.is_update else "발행"
+        # dual-sink: Obsidian 볼트 + Craft API (Craft 미설정이어도 Obsidian은 발행)
+        from stock_compass.output.report import publish_report
+
+        on_date = today_kst()
+        iso_year, iso_week, _ = on_date.isocalendar()
+        report_result = publish_report(
+            body,
+            on_date=on_date,
+            kind="weekly-discover",
+            title=f"주간 발굴 · {on_date.isoformat()}",
+            filename=f"{iso_year}-W{iso_week:02d} 발굴",
+        )
+        if report_result.obsidian_path is not None:
             console.print(
-                f"[green]✓ Craft {action}:[/green] [cyan]{publish_result.url}[/cyan]"
+                f"[green]✓ Obsidian:[/green] "
+                f"[cyan]{report_result.obsidian_path.name}[/cyan]"
             )
-        except CraftAuthError as e:
-            console.print(f"[yellow]Craft 인증 실패: {e}[/yellow]")
-        except CraftAPIError as e:
-            console.print(f"[red]Craft API 오류: {e}[/red]")
+        if report_result.craft_url:
+            console.print(
+                f"[green]✓ Craft 발행:[/green] [cyan]{report_result.craft_url}[/cyan]"
+            )
+        elif report_result.craft_skipped:
+            console.print(
+                f"[dim]Craft 발행 skip ({report_result.craft_skipped})[/dim]"
+            )
 
 
 def _preset_backtest_line(preset_sql: str, preset_name: str) -> str | None:

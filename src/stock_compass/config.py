@@ -96,6 +96,15 @@ class Settings(BaseSettings):
     log_dir: Path = PROJECT_ROOT / "logs"
     craft_export_dir: Path = PROJECT_ROOT / "data" / "craft_export"
 
+    # ─── Obsidian (자동 보고 dual-sink) ───
+    # 볼트는 로컬 파일시스템 폴더 — launchd 독립 프로세스가 .md 직접 기록 (MCP 불가).
+    # 미설정/미존재(iCloud 미동기) 시 graceful skip. .env.local에서 override 가능.
+    obsidian_vault_dir: Path | None = Path(
+        "/Users/seung-yeoblee/Library/Mobile Documents/"
+        "iCloud~md~obsidian/Documents/Personal Hub"
+    )
+    obsidian_reports_subdir: str = "03. Stock-Compass/Reports"
+
     # ─── 외부 호출 동작 ───
     yfinance_throttle_sec: float = 0.5
     external_api_retry: int = 3
