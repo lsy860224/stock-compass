@@ -3,6 +3,26 @@
 > SQLite 단일 파일 (`data/stock_compass.db`). 단일 사용자 가정.
 > 모든 시각은 UTC ISO 8601 문자열로 저장.
 
+> **코드 위치** (refactor 후): DB 접근 코드는 도메인별 `db/*` 모듈로 분해됐고
+> `db/__init__.py`가 전 심볼을 re-export한다 (`from stock_compass.db import …`).
+> 스키마/테이블/뷰 자체는 변동 없음 — 아래 정의 그대로 유효.
+>
+> | 테이블·뷰 | 코드 모듈 |
+> |---|---|
+> | DDL·마이그레이션 | `db/schema.py` · `db/migrations.py` |
+> | `tickers`·`ticker_meta` | `db/tickers.py` · `db/meta.py` |
+> | `composite_scores`·`factor_scores` | `db/scores.py` |
+> | 섹터 상대 집계 (순위·중앙값) | `db/sectors.py` |
+> | `trades` | `db/trades.py` (CRUD) · `db/trade_hindsight.py` (사후 검증) |
+> | `news_summaries`·`daily_token_usage` | `db/news.py` |
+> | `alerts` | `db/alerts.py` |
+> | `watchlists` (추적 그룹) | `db/watchlist.py` |
+> | `backtest_results` | `db/backtest.py` |
+> | 연결 컨텍스트 | `db/_connection.py` (`get_db_connection`) |
+>
+> 단, `universe_members`는 `screener/universes/__init__.py`가, `screener_runs`는
+> `screener/engine.py`가 직접 기록한다 (db/ 모듈 아님).
+
 ---
 
 ## ERD 요약

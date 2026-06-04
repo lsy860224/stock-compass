@@ -49,7 +49,10 @@ uv run stock-compass screen --sql "
 "
 ```
 
-### 진입점 D: 인터랙티브 REPL
+### 진입점 D: 인터랙티브 REPL  ⛔ 미구현 (선택 Phase 7-8)
+
+> 현재 `screen --interactive`는 친절 안내 후 종료(exit 2)만 한다. 대안: `--preset`
+> / `--file` / `--sql` / `--list-fields`. 아래는 향후 구현 시 목표 인터페이스.
 
 ```bash
 uv run stock-compass screen --interactive
@@ -426,7 +429,11 @@ uv run stock-compass sentiment import data/prompts/deepdive-YYYYMMDD-response.tx
 - **스크리너 노출**: 유니버스 *적재*는 멤버십만 채운다. 스크리너 결과로 뜨려면
   멤버 *점수화*(batch/backfill/discover)가 선행돼야 함 (US SP500과 동일).
 
-### US (`screener/universes/us.py`)
+### US (`screener/universes/_sources.py`)
+
+> KR·US fetcher는 모두 `_sources.py` 단일 모듈에 있고 `universes/__init__.py`가
+> orchestration(refresh·SUPPORTED_UNIVERSES). 테스트가 `_sources` 네임스페이스로
+> monkeypatch하므로 단일 모듈 유지 (CLAUDE.md §4 미분할 대상).
 
 | 유니버스 | 출처 | 갱신 주기 |
 |---|---|---|
@@ -451,7 +458,7 @@ universe_members (
 
 ---
 
-## 9) 인터랙티브 REPL 명령
+## 9) 인터랙티브 REPL 명령  ⛔ 미구현 (선택 Phase 7-8 — 향후 목표 인터페이스)
 
 ```
 .help              # 도움말
@@ -526,12 +533,12 @@ conn.execute("PRAGMA busy_timeout = 5000;")  # 5초
 | 단계 | 소요 | 산출물 |
 |---|---|---|
 | 7-1. 뷰 + universe_members 테이블 | 4h | DB 마이그레이션 + 시드 |
-| 7-2. 유니버스 자동 갱신 (KR + US) | 4h | `screener/universes/*.py` |
+| 7-2. 유니버스 자동 갱신 (KR + US) | 4h | `screener/universes/__init__.py`+`_sources.py` |
 | 7-3. SQL 실행 엔진 (RO 모드) | 2h | `screener/engine.py` |
-| 7-4. CLI (`screen` 명령 + 5개 진입점) | 4h | `cli.py` 확장 |
+| 7-4. CLI (`screen` 명령 + 5개 진입점) | 4h | `commands/screener/`(screen·discover·weekly·backtest) |
 | 7-5. 프리셋 6개 작성 | 2h | `screeners/presets/*.sql` |
 | 7-6. 백테스트 엔진 (기본만) | 6h | `screener/backtest.py` |
-| 7-7. 출력 (terminal/CSV/Craft/prompt-deepdive) | 4h | `output/` 확장 |
-| 7-8. 인터랙티브 REPL | 2h | (선택) |
+| 7-7. 출력 (terminal/CSV/Craft/prompt-deepdive) | 4h | `output/`(screener·craft_exporter 등) |
+| 7-8. 인터랙티브 REPL | 2h | (선택 — **미구현**, `screen --interactive`는 안내만) |
 | 7-9. 테스트 + 문서 | 4h | tests, README 업데이트 |
 | **합계** | **약 32h** | (3~4일 풀타임 / 1.5주 야간) |
