@@ -88,100 +88,120 @@
 
 ## 4) 파일 구조
 
+> 비대 모듈은 **관심사별 패키지/모듈로 분해** (파일 300줄 가이드). 명령군은
+> `commands/<group>/` 패키지로, 공개 API·import 경로는 `__init__.py` re-export로 보존.
+> 단일 클래스(어댑터·summarizer)·단일 팩터·schema DDL 등 응집 모듈은 분할하지 않음.
+
 ```
 stock-compass/
 ├── CLAUDE.md                          # 이 파일
 ├── pyproject.toml                     # uv·ruff·mypy 설정
-├── .env.example                       # 환경변수 템플릿
-├── .env.local                         # 실제 키 (gitignore)
-├── .gitignore
+├── .env.example / .env.local          # 환경변수 (실제 키는 gitignore)
 ├── README.md
-├── data/                              # SQLite + 캐시 (gitignore)
+├── data/                              # SQLite + 캐시 + 백업 (gitignore)
 │   ├── stock_compass.db
-│   └── cache/
+│   ├── backups/                       # 개수 기반 자동 백업 (utils/backup.py)
+│   ├── craft_export/                  # 일일 노트 MD 산출물
+│   └── prompts/                       # 하이브리드 Prompt MD
 ├── logs/                              # 실행 로그 (gitignore)
+├── screeners/presets/                 # *.sql 프리셋 (deep_value_kr 등)
 ├── src/
 │   └── stock_compass/
 │       ├── __init__.py
-│       ├── cli.py                     # typer 진입점 (메인 CLI)
+│       ├── __main__.py                # python -m stock_compass
+│       ├── cli.py                     # 얇은 facade — commands.app 노출만
 │       ├── config.py                  # 환경변수·상수
-│       ├── markets/                   # 시장별 어댑터
-│       │   ├── __init__.py
+│       ├── commands/                  # ★ CLI 명령 구현 (typer) — 실질 진입점
+│       │   ├── __init__.py            # 전 명령 import → app 등록
+│       │   ├── _app.py                # Typer app + 서브앱 + console
+│       │   ├── _helpers.py            # parse_market·resolve_targets·run_mixed
+│       │   ├── scoring/               # score·batch·history·batch-and-alert
+│       │   │   ├── _commands.py       #   typer 명령 4종
+│       │   │   ├── scheduler.py       #   launchd 자동화 (resolve_task·실행)
+│       │   │   ├── rescore.py         #   주간 유니버스 재채점
+│       │   │   └── reporting.py       #   결과 후처리 (보고·헬스체크·차트)
+│       │   ├── screener/              # screen·discover·weekly-discover·backtest
+│       │   │   ├── screen.py · discover.py · weekly.py · backtest.py
+│       │   │   └── _common.py · _cheatsheet.py
+│       │   ├── trade/                 # trade add·list·analyze·hindsight
+│       │   │   ├── entry.py · analyze.py · hindsight.py
+│       │   ├── universe.py · track.py · sentiment.py
+│       │   ├── news.py · report.py · backfill.py · alerts.py · dashboard.py
+│       ├── markets/                   # 시장별 어댑터 (단일 클래스 — 미분할)
 │       │   ├── base.py                # MarketAdapter 추상 클래스
 │       │   ├── us.py                  # 미국 (yfinance)
-│       │   └── kr.py                  # 한국 (yfinance + pykrx + DART)
-│       ├── factors/                   # 5대 팩터 계산
-│       │   ├── __init__.py
-│       │   ├── valuation.py
-│       │   ├── fundamentals.py
-│       │   ├── technical.py
-│       │   ├── macro.py
-│       │   └── sentiment.py
+│       │   ├── kr.py                  # 한국 (yfinance + pykrx + DART)
+│       │   ├── _kr_dart_financials.py # KR DART 재무 (kr.py 보조)
+│       │   └── _kr_sector_classifier.py
+│       ├── factors/                   # 6대 팩터 계산 (각 단일 관심사 — 미분할)
+│       │   ├── base.py                # FactorScore·FactorName
+│       │   ├── valuation.py · fundamentals.py · quality.py
+│       │   ├── technical.py · macro.py · sentiment.py
+│       │   └── _fundamentals_history.py
 │       ├── scoring/                   # 종합 점수 엔진
-│       │   ├── __init__.py
-│       │   └── engine.py
+│       │   ├── engine.py · size.py · backfill.py
 │       ├── alerts/                    # 알림 시스템
-│       │   ├── __init__.py
-│       │   ├── threshold.py           # 점수 임계치
-│       │   ├── delta.py               # 점수 급변
-│       │   └── daily.py               # 일일 리포트
+│       │   ├── base.py                # AlertManager
+│       │   ├── threshold.py · delta.py · daily.py
 │       ├── output/                    # 출력 어댑터
-│       │   ├── __init__.py
-│       │   ├── craft.py               # Craft Markdown 노트
 │       │   ├── terminal.py            # rich 콘솔
-│       │   ├── notify.py              # macOS osascript 알림
-│       │   ├── prompt_generator.py    # 하이브리드 모드 Prompt MD 생성
-│       │   └── exporter.py            # CSV / JSON
-│       ├── screener/                  # Phase 7 — SQL 스크리너
-│       │   ├── __init__.py
-│       │   ├── engine.py              # SQL 실행 (RO 모드)
-│       │   ├── views.py               # 뷰 DDL
-│       │   ├── universes/             # 유니버스 자동 갱신
-│       │   │   ├── __init__.py
-│       │   │   ├── kr.py              # KOSPI 200, KOSDAQ 150, ALL_KR
-│       │   │   └── us.py              # S&P 500, NASDAQ 100, DOW 30
-│       │   ├── backtest.py            # 백테스트 엔진
-│       │   ├── presets.py             # 프리셋 로더
-│       │   └── repl.py                # 인터랙티브 REPL (선택)
+│       │   ├── craft.py · craft_exporter.py · _craft_sections.py
+│       │   ├── craft_publisher.py · _craft_client.py
+│       │   ├── report.py · report_render.py · backtest_md.py
+│       │   ├── obsidian.py · notify.py · screener.py
+│       │   ├── prompt_generator.py · chart.py · valuation_range.py
+│       ├── screener/                  # Phase 7 — SQL 스크리너 (RO 모드)
+│       │   ├── engine.py · views.py · backtest.py · presets.py
+│       │   └── universes/             # 유니버스 자동 갱신
+│       │       ├── __init__.py        #   refresh·SUPPORTED_UNIVERSES
+│       │       └── _sources.py        #   KR/US fetcher (monkeypatch 결합 — 단일 NS)
 │       ├── llm/                       # Claude API + Prompt 모드
-│       │   ├── __init__.py
-│       │   ├── summarizer.py          # API 호출 (워치리스트용)
-│       │   └── prompt_importer.py     # Claude.ai 응답 import (하이브리드)
-│       ├── db/                        # SQLite 추상화
-│       │   ├── __init__.py
-│       │   ├── schema.py              # 테이블 정의
-│       │   ├── migrations.py
-│       │   └── repository.py
+│       │   ├── summarizer.py          # API 호출 (단일 클래스 — 미분할)
+│       │   ├── prompt_importer.py · prompts.py · models.py · pricing.py
+│       ├── db/                        # SQLite 추상화 (도메인별 모듈)
+│       │   ├── __init__.py            # 전 심볼 re-export 진입점
+│       │   ├── _connection.py · schema.py · migrations.py
+│       │   ├── tickers.py · scores.py · sectors.py   # sectors=섹터 집계
+│       │   ├── trades.py · trade_hindsight.py        # trades=CRUD / hindsight 분리
+│       │   ├── news.py · alerts.py · backtest.py · meta.py · watchlist.py
+│       ├── dashboard/                 # Streamlit 로컬 대시보드 (optional dep)
+│       │   ├── app.py                 # entrypoint (page_config·사이드바·디스패처)
+│       │   ├── _data.py               # 조회 헬퍼
+│       │   └── views/                 # 페이지 렌더러 (★ pages/ 명명 금지 — 멀티페이지 충돌)
+│       │       ├── overview.py · history.py · tracked.py · reports.py
+│       │       └── trades.py · backtest.py · backtest_history.py
 │       └── utils/
-│           ├── __init__.py
-│           ├── retry.py               # tenacity 래퍼
-│           ├── dates.py               # 거래일·시간대
-│           └── logging.py
-├── scripts/
-│   ├── setup.sh                       # 초기 셋업 (macOS)
-│   ├── install_launchd.sh             # launchd 등록
-│   └── uninstall_launchd.sh
-├── launchd/
-│   └── com.user.stockcompass.plist    # launchd 설정 템플릿
-├── docs/
-│   ├── IMPLEMENTATION_GUIDE.md
-│   ├── DATA_SOURCES.md
-│   ├── DB_SCHEMA.md
-│   ├── MARKET_CONFIG.md
-│   └── CRAFT_TEMPLATE.md
-└── tests/
-    ├── conftest.py
-    ├── test_factors/
-    ├── test_markets/
-    └── test_scoring/
+│           ├── retry.py · dates.py · logging.py · cache.py
+│           ├── backup.py · maintenance.py · krx_auth.py
+│           └── disclosure_classifier.py
+├── scripts/                           # setup.sh · install/uninstall_launchd.sh
+├── launchd/com.user.stockcompass.plist
+├── docs/                              # IMPLEMENTATION_GUIDE · DB_SCHEMA · DATA_SOURCES
+│   └── MARKET_CONFIG · CRAFT_TEMPLATE · HYBRID_SENTIMENT · SCREENER_SPEC
+└── tests/                             # test_{cli,db,factors,markets,scoring,
+    └── conftest.py                    #   screener,output,llm,alerts,dashboard,utils}/
 ```
 
 ### 경로 규칙
 
+- CLI 명령: `src/stock_compass/commands/[name].py` — 단순 명령은 단일 파일,
+  서브명령·헬퍼가 많으면 `commands/[group]/` 패키지로 (scoring·screener·trade 참조).
+  `commands/__init__.py`가 import해야 typer 등록됨.
 - 시장 어댑터: `src/stock_compass/markets/[market].py` (us, kr)
 - 팩터: `src/stock_compass/factors/[factor_name].py`
 - 새 알림 종류: `src/stock_compass/alerts/[trigger_name].py`
 - 출력 형식: `src/stock_compass/output/[target].py`
+- 대시보드 페이지: `src/stock_compass/dashboard/views/[page].py` (★ `pages/` 금지 —
+  Streamlit 멀티페이지 자동 인식과 충돌). `app.py` 디스패처에 등록.
+
+### 모듈 분해 원칙 (refactor 시)
+
+- **파일 300줄 가이드 초과** → 진짜 관심사 경계로 분할. 비대 명령은 패키지로.
+- **공개 API·import 경로 보존**: 동명 패키지 `__init__.py`에서 기존 심볼 re-export
+  (예: `commands.scoring.resolve_task`, `db.get_sector_score_rank`).
+- **분할하지 않는 것**: 단일 책임 클래스(market 어댑터·`llm.summarizer`),
+  단일 팩터 파일, `db/schema` DDL, 테스트가 모듈 네임스페이스로 monkeypatch하는
+  모듈(`screener.universes._sources`) — 쪼개면 응집도·테스트가 깨짐.
 
 ## 5) 환경변수
 
