@@ -228,12 +228,16 @@ Craft는 다음을 자연 변환:
 
 ---
 
-## 향후 (Phase 5+): Craft API 직접 발행
+## Craft API 직접 발행 (구현됨)
 
-`CRAFT_API_TOKEN` 발급 후 (Craft Settings → API):
+> 구현 완료. `output/craft.py`는 facade로 `CraftExporter`(노트 빌더 —
+> `craft_exporter.py`+`_craft_sections.py`)와 `CraftPublisher`
+> (`craft_publisher.py`+`_craft_client.py`)를 re-export한다.
+> `CRAFT_API_TOKEN` 발급 후 (Craft Settings → API) `--publish-craft` 플래그로 발행.
+> 아래는 초기 설계 당시의 illustrative 스니펫 (실제 구현과 파일·시그니처 다름).
 
 ```python
-# output/craft.py
+# (초기 설계 예시 — 실제는 output/craft_publisher.py 의 CraftPublisher)
 import httpx
 
 async def publish_to_craft(content: str, folder_id: str) -> str:
