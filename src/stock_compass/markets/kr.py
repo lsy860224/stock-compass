@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from datetime import UTC, datetime, time, timedelta
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
@@ -36,6 +37,64 @@ _logger = get_logger(__name__)
 _HISTORY_TTL = timedelta(hours=24)
 _INFO_TTL = timedelta(hours=6)
 _DISCLOSURE_TTL = timedelta(hours=6)
+
+# KR PER/PBR 시장 스냅샷 — 프로세스 생애 1회 빌드 후 전 스레드 공유 (배치 동시성 대비).
+_KR_FUND_SNAPSHOT: dict[str, dict[str, float | None]] = {}
+_KR_FUND_BUILT = threading.Event()
+_KR_FUND_LOCK = threading.Lock()
+
+
+def _clean_krx_value(v: object) -> float | None:
+    """KRX 결측/음수 표기(0·NaN)를 None 으로 정규화."""
+    import math
+
+    if not isinstance(v, int | float):
+        return None
+    fv = float(v)
+    return None if fv == 0 or math.isnan(fv) else fv
+
+
+def _kr_fundamental_snapshot() -> dict[str, dict[str, float | None]]:
+    """KOSPI+KOSDAQ 전종목 PER/PBR 스냅샷 (당일). KRX 자격증명 필요.
+
+    종목별 `get_market_fundamental(day,day,code)` 350회 대신 시장 스냅샷
+    `get_market_fundamental(day, market=...)` 2회로 빌드 → 동시 배치에서 KRX
+    throttle(빈 응답) 회피. 자격증명 없으면 빈 스냅샷 (per/pbr None 유지).
+    double-checked locking 으로 멀티스레드에서 1회만 빌드(in-place 채움).
+    """
+    if _KR_FUND_BUILT.is_set():
+        return _KR_FUND_SNAPSHOT
+    with _KR_FUND_LOCK:
+        if _KR_FUND_BUILT.is_set():
+            return _KR_FUND_SNAPSHOT
+        from stock_compass.utils.krx_auth import apply_krx_credentials, krx_quiet
+
+        if not apply_krx_credentials():
+            _KR_FUND_BUILT.set()  # 자격증명 없음 — 재시도 방지
+            return _KR_FUND_SNAPSHOT
+
+        try:
+            with krx_quiet():
+                from pykrx.stock import (
+                    get_market_fundamental,
+                    get_nearest_business_day_in_a_week,
+                )
+
+                day = get_nearest_business_day_in_a_week()
+                for mkt in ("KOSPI", "KOSDAQ"):
+                    df = get_market_fundamental(day, market=mkt)
+                    for code, row in df.iterrows():
+                        _KR_FUND_SNAPSHOT[str(code)] = {
+                            "per": _clean_krx_value(row["PER"]),
+                            "pbr": _clean_krx_value(row["PBR"]),
+                        }
+            _logger.info(
+                "KR fundamental 스냅샷 빌드: %d종목 (day=%s)", len(_KR_FUND_SNAPSHOT), day
+            )
+        except (ConnectionError, TimeoutError, ValueError, KeyError, IndexError, OSError) as e:
+            _logger.warning("pykrx 시장 fundamental 스냅샷 실패: %s", e)
+        _KR_FUND_BUILT.set()
+        return _KR_FUND_SNAPSHOT
 _KR_CODE_RE = re.compile(r"^\d{6}$")
 
 
@@ -333,37 +392,13 @@ class KrAdapter(MarketAdapter):
         )
 
     def _fetch_fundamentals_pykrx(self, code: str) -> dict[str, float | None]:
-        """KR PER/PBR 보강 — pykrx `get_market_fundamental` 사용.
+        """KR PER/PBR 보강 — pykrx 시장 스냅샷에서 종목 lookup.
 
-        pykrx 1.2.x 는 이 엔드포인트에 KRX 로그인(`KRX_ID`/`KRX_PW`)을 요구한다.
-        자격증명이 없으면 즉시 빈 dict 반환 — 종목마다 로그인 실패 배너·경고를
-        뿜지 않도록 단축한다 (yfinance KR 은 PER/PBR 미제공 → per/pbr 은 None 유지,
-        valuation 팩터는 peg/psr/ev_ebitda sector-relative 로 폴백).
+        종목별 호출이 아니라 KOSPI+KOSDAQ 전종목 스냅샷을 1회 빌드(프로세스 캐시)해
+        조회한다 — 배치(멀티스레드)에서 종목마다 KRX 를 두드리면 동시 요청이
+        throttle 되어 빈 응답을 받기 때문(per/pbr 미적재의 실제 원인).
         """
-        from stock_compass.utils.krx_auth import apply_krx_credentials, krx_quiet
-
-        if not apply_krx_credentials():
-            return {}  # KRX 자격증명 없음 — 정확 PER/PBR 조회 불가, 조용히 skip
-
-        try:
-            with krx_quiet():
-                from pykrx.stock import (
-                    get_market_fundamental,
-                    get_nearest_business_day_in_a_week,
-                )
-
-                day = get_nearest_business_day_in_a_week()
-                df = get_market_fundamental(day, day, code)
-            if df.empty:
-                return {}
-            row = df.iloc[-1]
-            return {
-                "per": float(row["PER"]) if row.get("PER") and row["PER"] != 0 else None,
-                "pbr": float(row["PBR"]) if row.get("PBR") and row["PBR"] != 0 else None,
-            }
-        except (ConnectionError, TimeoutError, ValueError, KeyError, IndexError, OSError) as e:
-            _logger.warning("pykrx fundamental 실패: %s (%s)", code, e)
-            return {}
+        return _kr_fundamental_snapshot().get(code, {})
 
     # ─── news ───
 
