@@ -36,6 +36,7 @@ class ObsidianExporter:
         filename: str,
         title: str,
         kind: str,
+        charts: list[tuple[str, bytes]] | None = None,
     ) -> Path | None:
         """볼트에 보고 노트 기록 후 경로 반환. 볼트 미가용 시 None (skip).
 
@@ -44,17 +45,22 @@ class ObsidianExporter:
             filename: 확장자 없는 파일명 (예: "2026-06-04 US")
             title: frontmatter title
             kind: frontmatter kind/tag (예: "daily", "batch-us")
+            charts: (caption, png_bytes) — `_attachments/`에 저장 후 `![[...]]` 임베드
         """
         base = self._reports_root()
         if base is None:
             return None
+
+        body = content
+        if charts:
+            body += "\n\n" + self._embed_charts(base, charts, on_date, kind)
 
         target_dir = base / subfolder
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
             path = target_dir / f"{_safe_filename(filename)}.md"
             path.write_text(
-                _frontmatter(title=title, on_date=on_date, kind=kind) + content,
+                _frontmatter(title=title, on_date=on_date, kind=kind) + body,
                 encoding="utf-8",
             )
         except OSError as e:
@@ -63,6 +69,26 @@ class ObsidianExporter:
 
         _logger.info("Obsidian 보고: %s", path)
         return path
+
+    def _embed_charts(
+        self,
+        base: Path,
+        charts: list[tuple[str, bytes]],
+        on_date: date_cls,
+        kind: str,
+    ) -> str:
+        """차트 PNG를 `_attachments/`에 저장하고 임베드 마크다운 반환 (실패는 격리)."""
+        attach = base / "_attachments"
+        lines = ["## 📈 점수 추이"]
+        for i, (caption, png) in enumerate(charts):
+            stem = _safe_filename(f"{on_date.isoformat()}-{kind}-{i}-{caption}")
+            try:
+                attach.mkdir(parents=True, exist_ok=True)
+                (attach / f"{stem}.png").write_bytes(png)
+                lines.append(f"\n**{caption}**\n\n![[{stem}.png]]")
+            except OSError as e:
+                _logger.warning("Obsidian 차트 저장 실패 (%s): %s", caption, e)
+        return "\n".join(lines)
 
     def _reports_root(self) -> Path | None:
         """<vault>/<reports_subdir> — 볼트 미설정/미존재 시 None."""

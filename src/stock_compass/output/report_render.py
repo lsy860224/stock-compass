@@ -80,6 +80,27 @@ def render_rescore_summary(
     return "\n".join(lines)
 
 
+def render_universe_entrants(
+    entrants: list[CompositeScore], on_date: date_cls, *, threshold: int
+) -> str:
+    """유니버스 관심권(≥threshold) 신규 진입 종목 — 직전 대비 새로 진입."""
+    lines = [
+        f"# 📈 관심권 신규 진입 · {on_date.isoformat()}",
+        "",
+        f"직전 재채점 대비 **{threshold}점 이상** 신규 진입 **{len(entrants)}종목**.",
+        "",
+        "| 종목 | 시장 | 점수 | 등급 | 섹터 |",
+        "| --- | :---: | ---: | :---: | --- |",
+    ]
+    lines += [
+        f"| {_label(s)} | {s.market} | {s.total_score:.1f} | {s.verdict} "
+        f"| {s.sector or '—'} |"
+        for s in entrants
+    ]
+    lines += ["", _footer()]
+    return "\n".join(lines)
+
+
 def render_alerts_note(fired: list, on_date: date_cls) -> str:  # type: ignore[type-arg]
     """발화된 알림 요약 — 임계치·급변 트리거 이력."""
     delivered = [f for f in fired if getattr(f, "delivered", False)]

@@ -90,6 +90,14 @@ class Settings(BaseSettings):
     alert_delta_min: int = 15
     daily_report_time: str = "07:00"
 
+    # ─── 유지보수 (retention) ───
+    # DB 백업은 713MB+ 라 개수 기반 보존이 안전 (기본 7개 = 직전 1주).
+    backup_retention_count: int = 7
+    # craft_export *.bak 누적 정리 — 파일당 최근 N개만 유지.
+    craft_export_backup_keep: int = 5
+    # 배치 실패율 헬스체크 — 이 비율 초과 시 macOS 알림 (0.3 = 30%).
+    batch_failure_alert_ratio: float = 0.3
+
     # ─── 경로 ───
     db_path: Path = PROJECT_ROOT / "data" / "stock_compass.db"
     cache_dir: Path = PROJECT_ROOT / "data" / "cache"

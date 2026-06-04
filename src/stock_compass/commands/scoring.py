@@ -308,6 +308,7 @@ def _run_scheduled_task(task: str, *, dry_run: bool) -> int:
             )
         if len(results) < len(targets):
             exit_code = 1
+            _batch_health_check(task, len(results), len(targets), dry_run=dry_run)
         if results:
             previous = _previous_scores_for(results)
             render_score_ranking(
@@ -380,19 +381,22 @@ def _run_scheduled_task(task: str, *, dry_run: bool) -> int:
                 kind="daily",
                 title=f"stock-compass · daily · {on_date.isoformat()}",
                 filename=on_date.isoformat(),
+                charts=_daily_charts(scores),
             )
         elif not scores:
             console.print("[yellow]오늘 스냅샷 없음 — 일일 노트 생략[/yellow]")
 
-        # CLAUDE.md 6) Phase 5 — daily 잡 직후 DB 자동 백업
+        # CLAUDE.md 6) Phase 5 — daily 잡 직후 DB 자동 백업 + 디스크 정리
         if not dry_run:
             from stock_compass.utils.backup import backup_database
+            from stock_compass.utils.maintenance import prune_craft_export_backups
 
             backup_path = backup_database(on_date=today_kst())
             if backup_path is not None:
-                console.print(
-                    f"[dim]✓ DB 백업: {backup_path.name}[/dim]"
-                )
+                console.print(f"[dim]✓ DB 백업: {backup_path.name}[/dim]")
+            pruned = prune_craft_export_backups()
+            if pruned:
+                console.print(f"[dim]✓ craft_export .bak 정리: {pruned}개[/dim]")
 
     return exit_code
 
@@ -433,6 +437,10 @@ def _run_universe_rescore(*, dry_run: bool) -> int:
         )
         return 0
 
+    # #1 멤버십 선갱신 — 재채점이 최신 편입/퇴출을 반영하도록 (실패 격리).
+    _refresh_universe_membership()
+    targets = resolve_universe_targets(_WEEKLY_RESCORE_UNIVERSES)
+
     # 풀 API sentiment 보장 — 기본 500k 한도면 ~120종목 후 fallback(50)으로 끊김.
     settings.anthropic_daily_input_limit = max(
         settings.anthropic_daily_input_limit, _WEEKLY_RESCORE_INPUT_LIMIT
@@ -471,7 +479,68 @@ def _run_universe_rescore(*, dry_run: bool) -> int:
             title=f"stock-compass · weekly-rescore · {on_date.isoformat()}",
             filename=f"{iso_year}-W{iso_week:02d} 재채점",
         )
+        # #3 관심권(≥threshold) 신규 진입 종목 → 노트 + macOS 알림
+        _report_universe_entrants(results, on_date)
     return 0 if len(results) == len(targets) else 1
+
+
+def _refresh_universe_membership() -> None:
+    """주간 재채점 전 유니버스 멤버십 갱신 (ALL_KR·SP500). 실패는 격리 (기존 정전 유지)."""
+    from stock_compass.db import get_db_connection
+    from stock_compass.screener.universes import UniverseFetchError, refresh
+
+    with get_db_connection() as conn:
+        for code in ("ALL_KR", "SP500"):
+            try:
+                r = refresh(conn, code)
+                console.print(
+                    f"[dim]universe {r.universe_code}: +{r.members} "
+                    f"(as_of={r.as_of_date})[/dim]"
+                )
+            except (UniverseFetchError, ValueError) as e:
+                console.print(f"[yellow]universe {code} 갱신 실패: {e}[/yellow]")
+
+
+def _report_universe_entrants(
+    results: list,  # type: ignore[type-arg]
+    on_date: date_cls,
+) -> None:
+    """직전 대비 관심권(≥alert_threshold_buy) 신규 진입 종목 보고 + macOS 알림."""
+    from stock_compass.config import settings
+    from stock_compass.db import get_db_connection, get_previous_total_scores
+    from stock_compass.output.notify import macos_notify
+    from stock_compass.output.report_render import render_universe_entrants
+
+    thr = settings.alert_threshold_buy
+    high = [s for s in results if s.total_score >= thr]
+    if not high:
+        return
+    with get_db_connection() as conn:
+        prev = get_previous_total_scores(
+            conn, [(s.ticker, s.market) for s in high], before_date=on_date
+        )
+    entrants = [
+        s
+        for s in high
+        if (p := prev.get((s.ticker, s.market))) is None or p[0] < thr
+    ]
+    if not entrants:
+        return
+    entrants.sort(key=lambda x: x.total_score, reverse=True)
+
+    _publish_via_sinks(
+        render_universe_entrants(entrants, on_date, threshold=thr),
+        on_date=on_date,
+        kind="universe-entry",
+        title=f"stock-compass · 관심권 신규진입 · {on_date.isoformat()}",
+        filename=f"{on_date.isoformat()} 관심권 진입",
+    )
+    top = ", ".join(f"{s.ticker}({s.total_score:.0f})" for s in entrants[:5])
+    macos_notify(
+        title=f"📈 유니버스 관심권 신규진입 {len(entrants)}종목",
+        body=f"≥{thr}점 진입: {top}" + (" 외" if len(entrants) > 5 else ""),
+        subtitle="주간 재채점",
+    )
 
 
 def _publish_via_sinks(
@@ -481,12 +550,18 @@ def _publish_via_sinks(
     kind: str,
     title: str,
     filename: str,
+    charts: list[tuple[str, bytes]] | None = None,
 ) -> None:
     """publish_report(Obsidian + Craft) 호출 + 결과 콘솔 출력 — 자동화 공용."""
     from stock_compass.output.report import publish_report
 
     result = publish_report(
-        content, on_date=on_date, kind=kind, title=title, filename=filename
+        content,
+        on_date=on_date,
+        kind=kind,
+        title=title,
+        filename=filename,
+        charts=charts,
     )
     if result.obsidian_path is not None:
         console.print(
@@ -538,6 +613,50 @@ def _publish_alerts_report(
         title=f"stock-compass · alerts · {on_date.isoformat()}",
         filename=f"{on_date.isoformat()} 알림",
     )
+
+
+def _batch_health_check(
+    task: str, succeeded: int, total: int, *, dry_run: bool
+) -> None:
+    """배치 실패율이 임계 초과면 macOS 알림 — 데이터 소스 장애 조기 감지."""
+    from stock_compass.config import settings
+
+    if total == 0:
+        return
+    failed = total - succeeded
+    ratio = failed / total
+    console.print(
+        f"[yellow]배치 실패 {failed}/{total} ({ratio:.0%})[/yellow]"
+    )
+    if dry_run or ratio < settings.batch_failure_alert_ratio:
+        return
+    from stock_compass.output.notify import macos_notify
+
+    macos_notify(
+        title="⚠️ stock-compass 배치 경고",
+        body=f"{task} 배치 {failed}/{total} 종목 실패 ({ratio:.0%}) — 데이터 소스 점검 필요",
+        subtitle="헬스체크",
+    )
+
+
+def _daily_charts(
+    scores: list,  # type: ignore[type-arg]
+) -> list[tuple[str, bytes]]:
+    """워치리스트 종목별 30일 점수추이 차트 (caption, png). 데이터 부족·실패는 skip."""
+    from stock_compass.db import get_db_connection, get_score_history
+    from stock_compass.output.chart import render_score_history_chart
+
+    charts: list[tuple[str, bytes]] = []
+    with get_db_connection() as conn:
+        for s in scores:
+            try:
+                hist = get_score_history(conn, s.ticker, s.market, days=30)
+                png = render_score_history_chart(hist, ticker=s.ticker, name=s.name)
+            except Exception:
+                png = None
+            if png is not None:
+                charts.append((f"{s.ticker} {s.name or ''}".strip(), png))
+    return charts
 
 
 def _previous_scores_for(

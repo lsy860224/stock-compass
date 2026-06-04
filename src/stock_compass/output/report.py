@@ -27,6 +27,7 @@ _SUBFOLDER: dict[str, str] = {
     "weekly-rescore": "03. Weekly",
     "weekly-discover": "03. Weekly",
     "alerts": "04. Alerts",
+    "universe-entry": "04. Alerts",
 }
 _DEFAULT_SUBFOLDER = "00. Misc"
 
@@ -70,6 +71,7 @@ def publish_report(
         filename=filename,
         title=title,
         kind=kind,
+        charts=charts,
     )
 
     craft_url: str | None = None
