@@ -97,7 +97,12 @@ _vad AS (
     _vad_lf.debt_to_equity, _vad_lf.current_ratio, _vad_lf.roa,
     _vad_tm.market_cap_krw, _vad_tm.size_bucket,
     _vad_lf.rsi_14, _vad_lf.ma200_distance, _vad_lf.volume_zscore,
-    _vad_lc.date AS as_of_date
+    _vad_lc.date AS as_of_date,
+    COALESCE(
+      (SELECT GROUP_CONCAT(DISTINCT um.universe_code) FROM universe_members um
+        WHERE um.ticker_id = t.id AND um.as_of_date <= '{d}'),
+      ''
+    ) AS universes
   FROM tickers t
   JOIN _vad_lc ON _vad_lc.ticker_id = t.id
   LEFT JOIN _vad_lf ON _vad_lf.ticker_id = t.id
