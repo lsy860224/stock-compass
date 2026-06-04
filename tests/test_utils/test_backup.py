@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import date, datetime, timedelta
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -57,38 +57,37 @@ class TestBackup:
         monkeypatch.setattr(settings, "db_path", tmp_path / "nope.db")
         assert backup_mod.backup_database() is None
 
-    def test_prunes_old_backups(
-        self, db_path: Path, tmp_path: Path
-    ) -> None:
+    def test_prunes_beyond_retention_count(self, db_path: Path) -> None:
+        """개수 기반 보존 — 파일명(날짜) 최신 N개만 유지, 오래된 백업 삭제.
+
+        DB가 700MB+ 라 시간이 아닌 개수 기반 보존 (backup.py 설계).
+        """
         backup_dir = db_path.parent / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
-        # 35일 이전 백업 (보존 기한 초과)
-        old = backup_dir / "stock_compass-20240101.db"
-        old.write_bytes(b"old")
-        ancient_mtime = (datetime.now() - timedelta(days=35)).timestamp()
-        import os
+        # 기존 백업 3개 (날짜 오름차순 이름)
+        for stamp in ("20260101", "20260102", "20260103"):
+            (backup_dir / f"stock_compass-{stamp}.db").write_bytes(b"old")
 
-        os.utime(old, (ancient_mtime, ancient_mtime))
+        # 새 백업 실행 (오늘 날짜) + 최신 2개만 유지 → 신규 백업도 count에 포함
+        backup_mod.backup_database(on_date=date(2026, 5, 27), retention_count=2)
 
-        # 새 백업 실행 (보존 30일)
-        backup_mod.backup_database(retention_days=30)
-        assert not old.exists()  # 정리됨
+        remaining = sorted(p.name for p in backup_dir.glob("stock_compass-*.db"))
+        # 신규(20260527) + 직전 최신(20260103)만 남고 나머지 삭제
+        assert remaining == [
+            "stock_compass-20260103.db",
+            "stock_compass-20260527.db",
+        ]
 
-    def test_retention_preserves_recent(
-        self, db_path: Path
-    ) -> None:
+    def test_retention_preserves_within_count(self, db_path: Path) -> None:
+        """보존 개수 이내 백업은 유지."""
         backup_dir = db_path.parent / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
         recent = backup_dir / "stock_compass-20260520.db"
         recent.write_bytes(b"recent")
-        # 어제 mtime
-        import os
 
-        recent_mtime = (datetime.now() - timedelta(days=1)).timestamp()
-        os.utime(recent, (recent_mtime, recent_mtime))
-
-        backup_mod.backup_database(retention_days=30)
-        assert recent.exists()  # 보존됨
+        # 새 백업 + 5개 보존 → 총 2개(20260520, 20260527)는 count 이내라 보존
+        backup_mod.backup_database(on_date=date(2026, 5, 27), retention_count=5)
+        assert recent.exists()
 
     def test_same_day_overwrites(self, db_path: Path) -> None:
         on_date = date(2026, 5, 27)
