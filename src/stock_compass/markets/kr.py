@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time as _time
 from datetime import UTC, datetime, time, timedelta
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
@@ -54,6 +55,33 @@ def _clean_krx_value(v: object) -> float | None:
     return None if fv == 0 or math.isnan(fv) else fv
 
 
+def _fetch_market_fundamental_resilient(
+    get_market_fundamental: Any, day: str, market: str, *, attempts: int = 4
+) -> Any:
+    """시장 fundamental 1콜 + throttle 재시도.
+
+    배치 동시성에서 KRX 가 PER 전부 NaN 인 throttle 응답을 줄 때가 있다(예외 아님).
+    PER 유효 비율이 낮으면 backoff 후 재시도, 최선 결과 반환.
+    """
+    best = None
+    best_valid = -1
+    for i in range(attempts):
+        df = get_market_fundamental(day, market=market)
+        valid = int(((df["PER"] > 0) & df["PER"].notna()).sum()) if not df.empty else 0
+        if valid > best_valid:
+            best, best_valid = df, valid
+        # 정상 응답은 보통 시장의 30%+ 가 유효 PER — 그 이상이면 즉시 채택
+        if best_valid >= max(20, len(df) // 5):
+            break
+        if i < attempts - 1:
+            _logger.warning(
+                "KRX %s fundamental throttle 의심 (유효 PER %d) — 재시도 %d/%d",
+                market, valid, i + 2, attempts,
+            )
+            _time.sleep(2.0 * (i + 1))
+    return best
+
+
 def _kr_fundamental_snapshot() -> dict[str, dict[str, float | None]]:
     """KOSPI+KOSDAQ 전종목 PER/PBR 스냅샷 (당일). KRX 자격증명 필요.
 
@@ -82,14 +110,18 @@ def _kr_fundamental_snapshot() -> dict[str, dict[str, float | None]]:
 
                 day = get_nearest_business_day_in_a_week()
                 for mkt in ("KOSPI", "KOSDAQ"):
-                    df = get_market_fundamental(day, market=mkt)
+                    df = _fetch_market_fundamental_resilient(
+                        get_market_fundamental, day, mkt
+                    )
                     for code, row in df.iterrows():
                         _KR_FUND_SNAPSHOT[str(code)] = {
                             "per": _clean_krx_value(row["PER"]),
                             "pbr": _clean_krx_value(row["PBR"]),
                         }
+            valid = sum(1 for v in _KR_FUND_SNAPSHOT.values() if v["per"] is not None)
             _logger.info(
-                "KR fundamental 스냅샷 빌드: %d종목 (day=%s)", len(_KR_FUND_SNAPSHOT), day
+                "KR fundamental 스냅샷 빌드: %d종목 (PER 유효 %d, day=%s)",
+                len(_KR_FUND_SNAPSHOT), valid, day,
             )
         except (ConnectionError, TimeoutError, ValueError, KeyError, IndexError, OSError) as e:
             _logger.warning("pykrx 시장 fundamental 스냅샷 실패: %s", e)
