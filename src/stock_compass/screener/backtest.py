@@ -224,6 +224,7 @@ def _compute_round_forward_returns(
 ) -> dict[str, dict[str, float | None]]:
     from stock_compass.config import settings
     from stock_compass.db.tickers import get_ticker_id
+    from stock_compass.markets import detect_market
 
     path = db_path or settings.db_path
     out: dict[str, dict[str, float | None]] = {}
@@ -231,19 +232,41 @@ def _compute_round_forward_returns(
         conn.row_factory = sqlite3.Row
         for row in rows:
             code = row.get("code") or row.get("ticker")
-            market: Market | None = row.get("market") or None
-            base_price = row.get("price") or row.get("price_at_score")
-            if not code or market not in ("KR", "US") or not base_price:
+            if not code:
+                continue
+            # preset SELECT 가 market/price 를 노출하지 않아도 동작하도록 자급:
+            # market 은 코드로 추론, base_price 는 as_of 시점 DB 에서 조회.
+            market: Market | None = row.get("market") or detect_market(str(code))
+            if market not in ("KR", "US"):
                 continue
             ticker_id = get_ticker_id(conn, str(code), market)
             if ticker_id is None:
                 continue
-            base = float(base_price)
+            row_price = row.get("price") or row.get("price_at_score")
+            base = float(row_price) if row_price else _base_price_at(conn, ticker_id, as_of)
+            if base is None or base <= 0:
+                continue
             out[str(code)] = {
                 p: _forward_return(conn, ticker_id, base, as_of, _PERIOD_DAYS[p])
                 for p in periods
             }
     return out
+
+
+def _base_price_at(
+    conn: sqlite3.Connection, ticker_id: int, as_of: date_cls
+) -> float | None:
+    """as_of 시점(이하 최신) price_at_score — preset 이 price 컬럼을 안 줄 때 진입가 보강."""
+    row = conn.execute(
+        """
+        SELECT price_at_score FROM composite_scores
+        WHERE ticker_id = ? AND date <= ? AND price_at_score IS NOT NULL
+        ORDER BY date DESC
+        LIMIT 1
+        """,
+        (ticker_id, as_of.isoformat()),
+    ).fetchone()
+    return float(row["price_at_score"]) if row and row["price_at_score"] is not None else None
 
 
 def _forward_return(
